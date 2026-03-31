@@ -1,5 +1,5 @@
 from typing import Iterable, List
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -11,19 +11,17 @@ class CreditAgricoleImmobilierScraper(SiteScraper):
     base_url = "https://etudes-economiques.credit-agricole.com"
     listing_base_url = "https://etudes-economiques.credit-agricole.com/fr/recherche"
 
-    def set_max_pages(self, max_pages: int | None):
-        self.max_pages = max_pages
-
     def iter_listing_urls(self) -> Iterable[str]:
-        """
-        Paginer sur ?search_api_fulltext=immobilier&search_mode=all&page=N
-        jusqu'à ce qu'une page ne contienne plus de résultats
-        ou jusqu'à max_pages si défini.
-        """
         page = 0
-
         while self.max_pages is None or page < self.max_pages:
-            url = self._with_page(self.listing_base_url, page)
+            url = self.with_page_query(
+                self.listing_base_url,
+                page,
+                extra_params={
+                    "search_api_fulltext": "immobilier",
+                    "search_mode": "all",
+                },
+            )
             resp = self.session.get(url, timeout=30)
             resp.raise_for_status()
 
@@ -66,27 +64,13 @@ class CreditAgricoleImmobilierScraper(SiteScraper):
         return resources
 
     def extract_content(self, resource: Resource) -> Resource:
-        """
-        Pour l'instant, on ne fait que récupérer le binaire du PDF, sans extraction texte.
-        """
         resp = self.session.get(resource.url, timeout=30)
         resp.raise_for_status()
         data = resp.content
 
         resource.raw_content = data
         resource.text = None
-
         return resource
-
-    def _with_page(self, url: str, page: int) -> str:
-        parsed = urlparse(url)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-
-        query.setdefault("search_api_fulltext", "immobilier")
-        query.setdefault("search_mode", "all")
-        query["page"] = str(page)
-
-        return urlunparse(parsed._replace(query=urlencode(query)))
 
     def _extract_row_title(self, row) -> str:
         for selector in [
