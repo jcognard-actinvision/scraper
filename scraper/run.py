@@ -4,10 +4,20 @@ import logging
 from pathlib import Path
 
 from scraper.sites.banque_france import BanqueFranceScraper
+from scraper.sites.bnp_paribas import BNPParibasScraper
+from scraper.sites.catella import CatellaScraper
 from scraper.sites.credit_agricole_immobilier import CreditAgricoleImmobilierScraper
 from scraper.sites.fbf import FBFScraper
+from scraper.sites.groupe_bpce import GroupeBPCEScraper
+from scraper.sites.knight_frank import KnightFrankScraper
 from scraper.sites.labanquepostale import LaBanquePostaleScraper
+from scraper.sites.leaseo import LeaseoScraper
+from scraper.sites.notaires_fr_tendances import NotairesFranceTendancesScraper
+from scraper.sites.notaires_grand_paris import NotairesGrandParisScraper
 from scraper.sites.observatoire_credit_logement import ObservatoireCreditLogementScraper
+from scraper.sites.savills import SavillsScraper
+from scraper.sites.societe_generale import SocieteGeneraleScraper
+from scraper.sites.wargny_katz import WargnyKatzScraper
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("scraper.run")
@@ -19,6 +29,16 @@ SCRAPER_REGISTRY = {
     "banque_france": BanqueFranceScraper,
     "credit_agricole_immobilier": CreditAgricoleImmobilierScraper,
     "labanquepostale": LaBanquePostaleScraper,
+    # "societe_generale": SocieteGeneraleScraper,
+    "groupe_bpce": GroupeBPCEScraper,
+    "bnp_paribas": BNPParibasScraper,
+    "wargny_katz": WargnyKatzScraper,
+    "notaires_grand_paris": NotairesGrandParisScraper,
+    "notaires_fr_tendances": NotairesFranceTendancesScraper,
+    "catella": CatellaScraper,
+    "savills": SavillsScraper,
+    "knight_frank": KnightFrankScraper,
+    "leaseo": LeaseoScraper,
 }
 
 
