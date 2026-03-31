@@ -1,0 +1,6 @@
+__pycache/
+*.py[codz]
+*$.py.class
+
+credentials.json
+token.json
