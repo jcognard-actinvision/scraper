@@ -32,7 +32,7 @@ SCRAPER_REGISTRY = {
     "banque_france": BanqueFranceScraper,
     "credit_agricole_immobilier": CreditAgricoleImmobilierScraper,
     "labanquepostale": LaBanquePostaleScraper,
-    # "societe_generale": SocieteGeneraleScraper,
+    "societe_generale": SocieteGeneraleScraper,
     "groupe_bpce": GroupeBPCEScraper,
     "bnp_paribas": BNPParibasScraper,
     "wargny_katz": WargnyKatzScraper,
