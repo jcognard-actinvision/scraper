@@ -3,10 +3,13 @@ import json
 import logging
 from pathlib import Path
 
+from scraper.sites.aspim import AspimScraper
 from scraper.sites.banque_france import BanqueFranceScraper
 from scraper.sites.bnp_paribas import BNPParibasScraper
+from scraper.sites.bnppre_market_france import BNPPREMarketFranceScraper
 from scraper.sites.catella import CatellaScraper
 from scraper.sites.credit_agricole_immobilier import CreditAgricoleImmobilierScraper
+from scraper.sites.cushman_wakefield import CushmanWakefieldScraper
 from scraper.sites.fbf import FBFScraper
 from scraper.sites.groupe_bpce import GroupeBPCEScraper
 from scraper.sites.knight_frank import KnightFrankScraper
@@ -39,6 +42,9 @@ SCRAPER_REGISTRY = {
     "savills": SavillsScraper,
     "knight_frank": KnightFrankScraper,
     "leaseo": LeaseoScraper,
+    "cushman_wakefield": CushmanWakefieldScraper,
+    "aspim": AspimScraper,
+    "bnppre_market_france": BNPPREMarketFranceScraper,
 }
 
 
