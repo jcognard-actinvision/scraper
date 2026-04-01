@@ -2,6 +2,8 @@ __pycache/
 *.py[codz]
 *$.py.class
 
+/gmail_output/
 /output/
-credentials.json
-token.json
+/gmail_fetcher/config.yaml
+/gmail_fetcher/credentials.json
+/gmail_fetcher/token.json

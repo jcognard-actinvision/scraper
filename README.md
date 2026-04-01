@@ -1,260 +1,312 @@
-# Scraper d’études économiques (PDF & HTML)
+# Stonelake – Scraper & Gmail Fetcher
 
-Ce projet permet de scraper automatiquement plusieurs sites d’institutions financières (banques centrales, observatoires, banques de détail, etc.) afin de récupérer :
+Ce projet regroupe :
+- un **module scraper** pour extraire des contenus web (HTML, PDF, métadonnées),
+- un **module gmail_fetcher** pour extraire le contenu et les pièces jointes PDF d’emails d’un label Gmail donné.
 
-- les pages d’articles (HTML),
-- les liens vers les documents PDF associés,
-- éventuellement le texte extrait des PDF.
+L’objectif est de produire des sorties homogènes (JSON + PDF) qui pourront ensuite être exploitées ou adaptées (par exemple pour alimenter Snowflake directement).
 
-L’objectif est de construire un pipeline homogène pour collecter et traiter des publications économiques (études, notes de conjoncture, observatoires, etc.).
+---
 
-## Fonctionnalités principales
+## Prérequis
 
-- Gestion centralisée des requêtes HTTP (session, headers, timeouts).
-- Abstraction commune pour chaque site (`SiteScraper`).
-- Gestion de la pagination (querystring `page`, patterns spécifiques par site).
-- Extraction des articles à partir des pages de listing.
-- Récupération des liens PDF spécifiques à chaque site.
-- Extraction du texte des PDF pour certains sites.
-- Paramétrage du nombre maximum de pages à parcourir par site.
+- Python 3.11+ recommandé.
+- Compte Google avec Gmail activé.
+- Accès à la console Google Cloud (création d’identifiants OAuth).
 
-## Structure du projet
+Installation des dépendances :
+
+```bash
+python -m venv .venv
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
+```
+
+---
+
+## Module scraper
+
+Le module `scraper` permet d’extraire des pages web et des documents (PDF) à partir de différentes sources configurées, puis de produire un JSON et des fichiers locaux (PDF, HTML, etc.).
+
+### Principales fonctionnalités
+
+- Récupération de pages d’insights / articles (ex. Cushman & Wakefield).
+- Extraction de métadonnées (titre, date, tags, etc.).
+- Téléchargement de pièces jointes PDF.
+- Normalisation de la sortie pour qu’elle soit facilement exploitable.
+
+### Configuration (exemple)
+
+Un exemple de fichier de configuration (YAML) typique pourrait ressembler à :
+
+```yaml
+sources:
+  - name: "cushman_fr_insights"
+    base_url: "https://www.cushmanwakefield.com"
+    listing_url: "https://www.cushmanwakefield.com/fr-fr/france/insights"
+    max_pages: 5
+    selectors:
+      article_links: "a.cw-card__link"
+      title: "h1"
+      date: "time"
+      tags: ".cw-tags a"
+    pdf_patterns:
+      - ".pdf"
+output_dir: "scraper_output"
+```
+
+Les champs exacts dépendent de ton implémentation, mais l’idée est de centraliser :
+- les URLs à explorer,
+- les sélecteurs CSS ou XPath,
+- les patterns de liens pour les PDF,
+- les paramètres de pagination.
+
+### Exécution (exemple)
+
+```bash
+python -m scraper.run
+```
+
+Le module produit un dossier de sortie, par exemple :
 
 ```text
-scraper/
-├── .gitignore
-├── list_gmail_label.py          # Script annexe pour Gmail (optionnel)
-└── scraper/
-    ├── __init__.py
-    ├── run.py                   # Point d’entrée principal (CLI / script)
-    ├── core/
-    │   ├── __init__.py
-    │   ├── base_site.py         # Classe abstraite commune SiteScraper
-    │   ├── http.py              # Session HTTP partagée (User-Agent, retries, etc.)
-    │   ├── models.py            # Modèle Resource, ResourceType, etc.
-    │   ├── parsers.py           # Fonctions d’extraction de texte (HTML, PDF)
-    │   └── predicates.py        # Fonctions utilitaires (filtres / conditions)
-    └── sites/
-        ├── __init__.py
-        ├── banque_france.py
-        ├── credit_agricole_immobilier.py
-        ├── fbf.py
-        ├── labanquepostale.py
-        ├── observatoire_credit_logement.py
-        └── societe_generale.py  # Exemple de nouveau site
+scraper_output/
+├── documents.json
+├── 2026-03-27_rapport_marche_paris.pdf
+├── 2026-03-15_etude_esg_immobilier.pdf
+└── ...
 ```
 
-### Modèle `Resource`
+`documents.json` contient la liste des documents extraits avec leurs métadonnées et le nom/chemin des PDF locaux.
 
-Le type central est `Resource` (dans `core/models.py`), qui représente une pièce de contenu à récupérer :
+---
 
-- `url` : URL de la ressource (HTML ou PDF).
-- `type` : `ResourceType.HTML` ou `ResourceType.PDF`.
-- `title` : titre de l’article ou du document.
-- `raw_content` : contenu binaire (HTML ou PDF).
-- `text` : texte brut associé (HTML ou PDF) quand il est extrait.
-- `meta` : dictionnaire avec informations supplémentaires (URL de listing, `pdf_url`, `html_text`, `pdf_text`, erreurs, etc.).
+## Module gmail_fetcher
 
-## Installation
+Le module `gmail_fetcher` extrait le contenu d’emails et les pièces jointes PDF à partir d’un label Gmail configuré.
 
-### Prérequis
+### Structure
 
-- Python 3.11+ (recommandé).
-- Un environnement virtuel Python (venv / conda) est conseillé.
+```text
+gmail_fetcher/
+├── __init__.py
+├── config.yaml
+├── gmail_client.py
+├── fetch_gmail.py
+└── list_labels.py
+```
 
-### Étapes
+### Configuration
+
+Fichier `gmail_fetcher/config.yaml` :
+
+```yaml
+user_id: "me"                    # ou l'adresse Gmail complète
+label_id: "Label_123456"         # ID interne Gmail du label
+output_dir: "gmail_output"       # dossier de sortie
+credentials_path: "credentials.json"
+token_path: "token.json"
+```
+
+- `label_id` : ID du label Gmail à utiliser (voir section “Lister les labels”).
+- `output_dir` : le dossier contiendra un JSON consolidé + les PDFs extraits.
+- `credentials_path` / `token_path` : chemins des fichiers d’authentification.
+
+---
+
+## Création du client OAuth dans Google Cloud
+
+1. Aller sur [https://console.cloud.google.com](https://console.cloud.google.com).
+2. Créer un projet (ou en utiliser un existant).
+3. Activer l’API Gmail :
+   - Menu “API & Services” → “Bibliothèque”.
+   - Chercher “Gmail API” → “Activer”.
+4. Configurer l’écran de consentement OAuth :
+   - “API & Services” → “Écran de consentement OAuth”.
+   - Type d’utilisateur : **Externe** (en général).
+   - Remplir les champs obligatoires (nom de l’app, mails, etc.).
+   - Ajouter le scope :
+     - `https://www.googleapis.com/auth/gmail.readonly`
+   - Passer l’app en **“En production”** une fois prête.
+5. Créer un ID client OAuth 2.0 :
+   - “Identifiants” → “Créer des identifiants” → “ID client OAuth”.
+   - Type d’application : **Application de bureau**.
+   - Donner un nom, puis créer.
+   - Télécharger le fichier JSON et le renommer en `credentials.json` à la racine du projet (ou adapter `credentials_path` dans `config.yaml`).
+
+---
+
+## Authentification Gmail & gestion du token
+
+Lors de la première exécution d’un script `gmail_fetcher` :
+
+- Une fenêtre de navigateur s’ouvre pour autoriser l’application à accéder à Gmail en lecture seule.
+- Les informations d’authentification sont stockées dans `token.json` (access_token + refresh_token).
+
+Le code gère automatiquement :
+- le rafraîchissement de l’access_token quand il expire,
+- la réauthentification (ouverture du navigateur) si le refresh_token lui-même est invalide (révoqué, etc.), puis la réécriture de `token.json`.
+
+---
+
+## Lister les labels Gmail
+
+Pour récupérer l’ID du label à utiliser dans `config.yaml` :
 
 ```bash
-git clone https://github.com/jcognard-actinvision/scraper.git
-cd scraper
+python -m gmail_fetcher.list_labels
+```
 
+Ce script :
+- charge `credentials.json` / `token.json`,
+- affiche la liste des labels et leurs IDs, par exemple :
+
+```text
+INBOX                          INBOX                                             (system)
+Label_123456                   Mon label SG                                      (user)
+Label_ABCDEF                   Autre label                                       (user)
+...
+```
+
+Copier l’`id` souhaité (ex. `Label_123456`) dans `gmail_fetcher/config.yaml`.
+
+---
+
+## Extraire les emails et PDF d’un label
+
+Une fois le label configuré :
+
+```bash
+python -m gmail_fetcher.fetch_gmail
+```
+
+Ce script :
+
+- lit `gmail_fetcher/config.yaml`,
+- se connecte à l’API Gmail,
+- parcourt tous les emails du label configuré,
+- pour chaque email :
+  - récupère les headers principaux (subject, date, from),
+  - extrait le corps en `text/plain` et `text/html`,
+  - télécharge les **pièces jointes PDF** dans `output_dir`,
+- génère un fichier `gmail_label_dump.json` dans `output_dir` contenant la liste des messages et les PDFs associés.
+
+Exemple de structure JSON (simplifiée) :
+
+```json
+[
+  {
+    "id": "17c8f4b123456789",
+    "subject": "Rapport trimestriel",
+    "date": "Wed, 27 Mar 2026 10:15:30 +0100",
+    "from": "Banque <contact@banque.fr>",
+    "label_id": "Label_123456",
+    "body_text": "Contenu texte...",
+    "body_html": "<p>Contenu HTML...</p>",
+    "pdf_attachments": [
+      "17c8f4b123456789_rapport_q1.pdf"
+    ]
+  }
+]
+```
+
+---
+
+## Architecture
+
+L’architecture générale repose sur deux modules principaux qui produisent des sorties homogènes (JSON + PDF).
+
+### Vue d’ensemble
+
+- **scraper**
+  - Input : configuration des sites à crawler (URL, patterns, règles d’extraction).
+  - Process :
+    - Télécharge des pages web (HTML).
+    - Extrait métadonnées (titre, date, tags, etc.).
+    - Détecte et télécharge les fichiers PDF liés.
+    - Normalise les résultats dans une structure JSON.
+  - Output :
+    - Dossier `scraper_output/` (nom indicatif) avec :
+      - PDF locaux.
+      - Fichier(s) JSON listant les documents et leurs attributs.
+
+- **gmail_fetcher**
+  - Input : configuration du label Gmail et des chemins (`config.yaml`).
+  - Process :
+    - Connexion à l’API Gmail via OAuth2 (`credentials.json` + `token.json`).
+    - Liste des messages d’un label Gmail donné.
+    - Extraction du corps (texte/HTML).
+    - Téléchargement des pièces jointes PDF.
+    - Normalisation des résultats dans une structure JSON cohérente avec le scraper.
+  - Output :
+    - Dossier `gmail_output/` avec :
+      - PDFs issus des emails.
+      - `gmail_label_dump.json` listant les messages et les pièces jointes.
+
+### Schéma textuel des flux
+
+```text
+            +------------------+
+            |  Config fichiers |
+            | (YAML / JSON)    |
+            +---------+--------+
+                      |
+          +-----------+-----------+
+          |                       |
+   +------+-----+           +-----+--------+
+   |  scraper   |           | gmail_fetcher|
+   +------+-----+           +------+-------+
+          |                         |
+   HTML / PDF web             Emails + PDF
+          |                         |
+   +------+-----+           +------+-------+
+   | JSON sortie|           | JSON sortie  |
+   | (web docs) |           | (emails)     |
+   +------------+           +--------------+
+```
+
+### Points clé de conception
+
+- **Séparation des responsabilités** :
+  - `scraper` ne gère que les sources web.
+  - `gmail_fetcher` ne gère que Gmail et l’authentification OAuth2.
+- **Configuration explicite** :
+  - Chaque module a ses propres fichiers de configuration, indépendants.
+  - `gmail_fetcher` repose sur `config.yaml` pour `label_id`, chemins d’output et de credentials.
+- **Sorties homogènes** :
+  - Les deux modules produisent :
+    - des fichiers JSON décrivant les documents,
+    - des PDF stockés localement avec des chemins/références dans le JSON.
+
+---
+
+## Lancer l’environnement de développement
+
+Rappel rapide :
+
+```bash
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt  # si un fichier existe
-# ou bien installer manuellement:
-pip install requests beautifulsoup4 pdfminer.six rich  # à adapter
+pip install -r requirements.txt
 ```
 
-> Remarque : il est recommandé de lister toutes les dépendances dans `requirements.txt`.
-
-## Utilisation
-
-### Lancement simple depuis `run.py`
-
-Le fichier `scraper/run.py` regroupe la logique permettant de choisir un site et d’exécuter le scraping. Un schéma classique ressemble à :
-
-```python
-from scraper.sites.banque_france import BanqueFranceScraper
-from scraper.sites.credit_agricole_immobilier import CreditAgricoleImmobilierScraper
-from scraper.sites.fbf import FBFScraper
-from scraper.sites.labanquepostale import LaBanquePostaleScraper
-from scraper.sites.observatoire_credit_logement import ObservatoireCreditLogementScraper
-from scraper.sites.societe_generale import SocieteGeneraleScraper
-
-SITES = {
-    "banque_france": BanqueFranceScraper,
-    "ca_immobilier": CreditAgricoleImmobilierScraper,
-    "fbf": FBFScraper,
-    "labanquepostale": LaBanquePostaleScraper,
-    "observatoire_credit_logement": ObservatoireCreditLogementScraper,
-    "societe_generale": SocieteGeneraleScraper,
-}
-```
-
-Un pattern d’exécution typique :
+Puis, au choix :
 
 ```bash
-python -m scraper.run banque_france --max-pages 3
+# Scraper web
+python -m scraper.run
+
+# Lister les labels Gmail
+python -m gmail_fetcher.list_labels
+
+# Extraire les emails + PDF d'un label
+python -m gmail_fetcher.fetch_gmail
 ```
-
-ou, si `run.py` est scriptable directement :
-
-```bash
-python scraper/run.py banque_france --max-pages 3
-```
-
-Selon ta mise en place actuelle, les options peuvent varier (nom du site, nombre de pages, output JSON/CSV, etc.).
-
-### Exemple d’usage programmatique
-
-```python
-from scraper.sites.banque_france import BanqueFranceScraper
-
-scraper = BanqueFranceScraper()
-scraper.set_max_pages(2)  # optionnel
-resources = scraper.run()
-
-for res in resources:
-    print(res.type, res.title, res.meta.get("pdf_url"))
-```
-
-## Détail par site
-
-### Banque de France
-
-- Listing : `https://www.banque-france.fr/fr/publications-et-statistiques/publications?page=N`
-- Pagination via querystring `page`.
-- Sélection des cartes via `div.col.d-flex a.card[href]`.
-- Pour chaque article HTML :
-  - Titre depuis `<h1>` (fallback dans la carte si besoin).
-  - Texte principal depuis `<main>` (ou `body`).
-  - Lien PDF via  
-    `div.paragraph--type--espaces2-telecharger-document a.card-download[href]`.
-  - `pdf_url` et `html_text` stockés dans `resource.meta`.
-
-### Crédit Agricole Immobilier
-
-- Listing :  
-  `https://etudes-economiques.credit-agricole.com/fr/recherche?search_api_fulltext=immobilier&search_mode=all&page=N`
-- Paramètres fixes : `search_api_fulltext=immobilier`, `search_mode=all`, plus `page`.
-- Les pages de listing retournent directement des liens PDF via  
-  `div.search-engine-result-row a.btn-download[href]`.
-- `Resource` créées en type `PDF`, avec `pdf_url` renseigné.
-
-### FBF (Fédération Bancaire Française)
-
-- Listings : plusieurs URLs (chiffres clés, emploi, etc.) définies dans `LISTING_URLS`.
-- Extraction des articles via `div.category__content article a.card__link`.
-- Pagination supplémentaire via un endpoint AJAX (`/fr/ajax-post/filtered-posts-page`) alimenté par le formulaire `#category-posts-filter`.
-- Sur chaque article HTML :
-  - `html_text` extrait depuis `<main>` / `<article>`.
-  - Lien PDF (href se terminant par `.pdf`).
-  - PDF téléchargé, texte extrait via `extract_pdf_text`.
-  - `resource.text` contient le texte PDF si disponible, sinon le texte HTML.
-
-### La Banque Postale
-
-- Plusieurs URLs de base dans `LISTING_URLS` du type `.../rebond.p-1.html`.
-- Pagination via un pattern `*.p-<page>.html`.
-- Extraction des articles via `div.o-newslist__push a.u-link[href]`.
-- Sur chaque article HTML :
-  - Titre depuis `<h1>`.
-  - Texte principal depuis `<main>` / `body`.
-  - Lien PDF via `div.m-cta--download a.m-cta[href]`.
-
-### Observatoire Crédit Logement
-
-- Listing unique : `/historique`.
-- Ciblage de la section « Analyses du marché immobilier mensuelles ».
-- Parcours des titres `h3` situés dans cette section, avec un lien « En savoir plus ».
-- Sur chaque article HTML :
-  - Titre depuis `<h1>` / `<h2>`.
-  - Texte principal depuis `div#page-publications`, `<main>` ou `body`.
-  - Lien PDF dans `div.box-download a[href$=".pdf"]`.
-  - PDF récupéré, texte stocké dans `resource.meta["pdf_text"]` et `resource.text`.
-
-### Société Générale (Études économiques)
-
-- Listing :  
-  `https://www.societegenerale.com/fr/etudes-economiques?type=153&lock_type=yes&page=N`
-- Paramètres fixes : `type=153`, `lock_type=yes`, plus `page`.
-- Articles du listing sélectionnés via `ul.newsroom-list a.actu-thumb[href]`.
-- Sur chaque article HTML :
-  - Titre depuis `<h1>`.
-  - Texte principal depuis `<main>` / `body`.
-  - Lien PDF via  
-    `div.bloc-element-de-contexte a.custom-download-link[href]`.
-
-## Base commune : `SiteScraper`
-
-Toutes les classes de site héritent de `SiteScraper` (`core/base_site.py`), qui fournit :
-
-- Un constructeur qui crée une session HTTP partagée.
-- Trois méthodes abstraites à implémenter :
-
-  ```python
-  def iter_listing_urls(self) -> Iterable[str]: ...
-  def extract_resources_from_listing(self, html: str, url: str) -> List[Resource]: ...
-  def extract_content(self, resource: Resource) -> Resource: ...
-  ```
-
-- Des helpers génériques pour factoriser le code :
-
-  - `set_max_pages(max_pages: int | None)` : limite le nombre de pages de listing.
-  - `safe_get(url, retries=2, delay=1.5)` : GET avec retries.
-  - `with_page_query(url, page, extra_params=None)` : gestion propre de `?page=N` + autres paramètres.
-  - `iter_paginated_listing_urls(base_url, extract_resources_fn, first_page=0)` : boucle générique de pagination jusqu’à épuisement des résultats.
-
-- Une méthode `run()` qui orchestre le pipeline par défaut :
-
-  1. Itère sur `iter_listing_urls()` pour récupérer toutes les pages de listing.
-  2. Appelle `extract_resources_from_listing()` sur chaque page.
-  3. Télécharge et enrichit chaque `Resource` via `extract_content()`.
-
-## Ajouter un nouveau site
-
-Pour ajouter un nouveau site :
-
-1. Créer `scraper/sites/mon_site.py`.
-2. Définir une classe `MonSiteScraper(SiteScraper)` avec :
-
-   - `base_url` et éventuellement `listing_base_url`.
-   - `iter_listing_urls()` :
-     - soit via `iter_paginated_listing_urls(...)` si la pagination est de type `?page=N`,
-     - soit via une simple boucle sur une liste d’URLs.
-   - `extract_resources_from_listing(html, url)` pour transformer une page de listing en liste de `Resource`.
-   - `extract_content(resource)` pour télécharger la ressource et remplir `raw_content`, `text`, `meta`.
-
-3. Enregistrer la classe dans `scraper/run.py`.
-4. Tester avec `set_max_pages(1)` avant de lancer sur tout l’historique.
-
-## Logs et debug
-
-Chaque scraper utilise un logger (`logging.getLogger("scraper.<site>")`) avec des messages comme :
-
-- nombre de ressources trouvées sur une page de listing ;
-- URL de PDF trouvés / non trouvés ;
-- erreurs de récupération ou de parsing.
-
-Configure le niveau de logs dans `run.py` pour faciliter le debug.
-
-## Script Gmail (optionnel)
-
-`list_gmail_label.py` fournit un script séparé pour interagir avec l’API Gmail (par exemple lister des messages d’un label donné). Il n’est pas directement intégré au pipeline de scraping mais peut servir à croiser des informations ou à archiver des mails liés aux études.
-
-## Limitations et TODO
-
-- Extraction du texte PDF seulement pour certains sites (FBF, Observatoire, …).
-- Pas encore d’export standardisé (JSON/CSV) des ressources.
-- Pas de persistance centralisée (base de données) ni de dédoublonnage.
