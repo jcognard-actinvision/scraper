@@ -3,7 +3,7 @@ __pycache/
 *$.py.class
 
 /gmail_output/
-/output/
+/scraper_output/
 /gmail_fetcher/config.yaml
 /gmail_fetcher/credentials.json
 /gmail_fetcher/token.json

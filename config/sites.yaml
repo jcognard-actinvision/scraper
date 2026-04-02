@@ -1,0 +1,54 @@
+sites:
+  - id: "cushman_fr_insights"
+    enabled: true
+    base_url: "https://www.cushmanwakefield.com"
+    listing:
+      url: "https://www.cushmanwakefield.com/fr-fr/france/insights"
+      pagination:
+        type: "page_param"
+        param: "page"
+        start: 1
+        max_pages: 5
+    selectors:
+      item_link: "a.cw-card__link"
+      title: "h1"
+    pdf:
+      link_selectors:
+        - "a[href$='.pdf']"
+      follow_redirects: true
+    adapter: "scraper.adapters.cushman_fr:CushmanFrAdapter"
+  - id: "banque_france"
+    enabled: true
+    base_url: "https://www.banque-france.fr"
+    listing:
+      url: "https://www.banque-france.fr/liste-actualites"
+      pagination:
+        type: "page_param"
+        param: "page"
+        start: 1
+        max_pages: 10
+    selectors:
+      item_link: "article .node-title a"
+      title: "h1"
+    pdf:
+      link_selectors:
+        - "a[href$='.pdf']"
+    adapter: "scraper.adapters.banque_france:BanqueFranceAdapter"
+  - id: "leaseo"
+    enabled: true
+    base_url: "https://www.leaseo.fr"
+    listing:
+      url: "https://www.leaseo.fr/actualitesMore"
+      pagination:
+        type: "json_offset"
+        param: "offset"
+        start: 0
+        max_pages: 50
+    selectors:
+      item_link: "" # non utilisé (API JSON)
+      title: "section.blocTitre h1"
+      content: "section.blocContenu"
+    pdf:
+      link_selectors:
+        - "a[href$='.pdf']"
+    adapter: "scraper.adapters.leaseo:LeaseoAdapter"
