@@ -90,6 +90,9 @@ def run_site_scraper(cfg: SiteConfig) -> None:
         item_urls = iter_item_urls(cfg)
 
     logger.info("Site %s: %d item URLs", cfg.id, len(item_urls))
+    if not item_urls:
+        logger.warning("Site %s: aucune URL d'item trouvée", cfg.id)
+
     for url in item_urls:
         doc = scrape_item(url, cfg, adapter)
         save_document(doc)

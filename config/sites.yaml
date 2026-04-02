@@ -3,20 +3,22 @@ sites:
     enabled: true
     base_url: "https://www.cushmanwakefield.com"
     listing:
+      # cette URL n'est pas utilisée directement pour le listing HTML,
+      # mais tu peux la laisser pour cohérence, le vrai listing se fait
+      # via SEARCH_URL dans l'adapter.
       url: "https://www.cushmanwakefield.com/fr-fr/france/insights"
       pagination:
-        type: "page_param"
-        param: "page"
-        start: 1
-        max_pages: 5
+        type: "json_offset" # ou ce que tu veux, l'adapter gère lui-même la pagination
+        param: "firstResult"
+        start: 0
+        max_pages: 50
     selectors:
-      item_link: "a.cw-card__link"
+      item_link: "" # non utilisé, iter_item_urls fait le job
       title: "h1"
+      content: "div.page-content-body, article"
     pdf:
-      link_selectors:
-        - "a[href$='.pdf']"
-      follow_redirects: true
-    adapter: "scraper.adapters.cushman_fr:CushmanFrAdapter"
+      link_selectors: []
+    adapter: "scraper.adapters.cushman_fr_insights:CushmanFrInsightsAdapter"
   - id: "banque_france"
     enabled: true
     base_url: "https://www.banque-france.fr"
