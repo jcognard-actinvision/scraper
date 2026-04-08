@@ -157,7 +157,14 @@ def attachment_to_document(
         external_id=f"{message_id}:{attachment_id}",
         metadata={
             "message_id": message_id,
+            "attachment_id": attachment_id,
             "filename": attachment.get("filename"),
+            "subject": attachment.get("subject"),
+            "date": attachment.get("date"),
+            "from": attachment.get("from"),
+            "label_id": attachment.get("label_id"),
+            "body_text": attachment.get("body_text"),
+            "body_html": attachment.get("body_html"),
         },
     )
 
@@ -233,14 +240,14 @@ def main():
                 results.append(result)
                 processed += 1
 
-                if hasattr(storage, "exists") and storage.exists(
-                    source_name=source_name,
-                    external_id=msg_id,
-                ):
-                    skipped += 1
-                else:
-                    storage.save_document(email_to_document(source_name, result))
-                    inserted += 1
+                # if hasattr(storage, "exists") and storage.exists(
+                #     source_name=source_name,
+                #     external_id=msg_id,
+                # ):
+                #     skipped += 1
+                # else:
+                #     storage.save_document(email_to_document(source_name, result))
+                #     inserted += 1
 
                 for attachment in pdf_attachments:
                     att_external_id = f"{msg_id}:{attachment['attachment_id']}"
@@ -248,10 +255,17 @@ def main():
                         "attachment_id": attachment["attachment_id"],
                         "filename": attachment["filename"],
                         "content": attachment["content"],
+                        # nouvelles métadonnées mail
+                        "message_id": msg_id,
+                        "subject": subject,
+                        "date": date,
+                        "from": frm,
+                        "label_id": label_id,
+                        "body_text": body["text"],
+                        "body_html": body["html"],
                     }
                     if hasattr(storage, "exists") and storage.exists(
-                        source_name=source_name,
-                        external_id=att_external_id,
+                        source_name=source_name, external_id=att_external_id
                     ):
                         continue
                     storage.save_document(

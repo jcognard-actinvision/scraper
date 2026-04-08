@@ -1,5 +1,0 @@
-user_id: "me"
-label_id: "Label_123456"  # id interne Gmail
-output_dir: "gmail_output"
-credentials_path: "credentials.json"
-token_path: "token.json"

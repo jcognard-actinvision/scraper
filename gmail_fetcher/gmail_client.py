@@ -17,13 +17,13 @@ def get_gmail_service(
     credentials_path: str = "credentials.json",
     token_path: str = "token.json",
 ):
+    headless = os.getenv("GMAIL_HEADLESS", "false").lower() in ("1", "true", "yes")
+
     creds = None
 
-    # 1) Charger un éventuel token existant
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
-    # 2) Si pas de creds ou invalides → essayer de refresh, sinon réauth
     if not creds or not creds.valid:
         need_reauth = False
 
@@ -31,20 +31,23 @@ def get_gmail_service(
             try:
                 creds.refresh(Request())
             except RefreshError:
-                # refresh_token invalide / révoqué → on force une réauth
                 need_reauth = True
         else:
             need_reauth = True
 
         if need_reauth:
+            if headless:
+                raise RuntimeError(
+                    "GMAIL_HEADLESS=true et credentials invalides : "
+                    "impossible de lancer un flow interactif dans cet environnement. "
+                    "Génère ou corrige token.json en local d'abord."
+                )
             flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        # 3) Sauvegarde (nouveau token ou token rafraîchi)
         with open(token_path, "w", encoding="utf-8") as token:
             token.write(creds.to_json())
 
-    # 4) Construction du service
     service = build("gmail", "v1", credentials=creds)
     return service
 

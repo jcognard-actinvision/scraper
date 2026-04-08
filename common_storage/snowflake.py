@@ -127,6 +127,15 @@ class SnowflakeStorage(StorageBackend):
             "fetched_url",
             "final_url",
             "summary_text",
+            "message_id",
+            "attachment_id",
+            "filename",
+            "subject",
+            "date",
+            "from",
+            "label_id",
+            "body_text",
+            "body_html",
         }
 
         cleaned = {k: v for k, v in metadata.items() if k in allowed}
