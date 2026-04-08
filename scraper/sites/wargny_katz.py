@@ -75,12 +75,11 @@ class WargnyKatzScraper(SiteScraper):
             resource.text = None
             return resource
 
-        data = resp.content
-        resource.raw_content = data
-
         if resource.type == ResourceType.HTML:
-            html = data.decode(resp.encoding or "utf-8", errors="ignore")
+            html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
+
+            resource.meta["article_url"] = resource.url
 
             title_node = soup.select_one("h3.entry-title") or soup.select_one(
                 "h1.entry-title"
@@ -98,7 +97,6 @@ class WargnyKatzScraper(SiteScraper):
                 )
 
             resource.meta["html_text"] = html_text
-            resource.text = html_text
 
             pdf_link = self._extract_pdf_link(soup)
             if pdf_link:
@@ -106,16 +104,34 @@ class WargnyKatzScraper(SiteScraper):
                 resource.meta["pdf_url"] = pdf_url
                 resource.meta["source_html"] = resource.url
                 logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+
+                pdf_resp = self.safe_get(pdf_url)
+                if pdf_resp is not None:
+                    resource.type = ResourceType.PDF
+                    resource.url = pdf_url
+                    resource.raw_content = pdf_resp.content
+                    resource.text = None
+                    return resource
+
+                resource.meta["pdf_error"] = "pdf_unavailable"
             else:
                 logger.info("Resource: %s | PDF: none", resource.url)
 
-        elif resource.type == ResourceType.PDF:
-            resource.text = None
+            resource.raw_content = resp.content
+            resource.text = html_text
+            return resource
 
+        elif resource.type == ResourceType.PDF:
+            resource.raw_content = resp.content
+            resource.text = None
+            return resource
+
+        resource.raw_content = resp.content
+        resource.text = None
         return resource
 
     def _extract_pdf_link(self, soup: BeautifulSoup) -> str | None:
-        for link in soup.select("div.et_pb_post_content a[href]"):
+        for link in soup.select("div.et_pb_button_module_wrapper a[href]"):
             href = link.get("href")
             if not href:
                 continue

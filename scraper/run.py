@@ -1,8 +1,10 @@
 import argparse
-import json
 import logging
-from pathlib import Path
 
+from common_runtime.settings import Settings
+from common_storage.local import LocalStorage
+from common_storage.models import StoredDocument
+from common_storage.snowflake import SnowflakeStorage
 from scraper.sites.aspim import AspimScraper
 from scraper.sites.banque_france import BanqueFranceScraper
 from scraper.sites.bnp_paribas import BNPParibasScraper
@@ -66,6 +68,35 @@ def build_scrapers(site_names=None, max_pages: int | None = None):
             s.set_max_pages(max_pages)
 
     return scrapers
+
+
+def build_storage_backend():
+    if Settings.storage_backend == "snowflake":
+        return SnowflakeStorage.from_env()
+    return LocalStorage(output_dir="output")
+
+
+def map_resource_to_document(source_name: str, resource) -> StoredDocument:
+    mime_type = (
+        "application/pdf"
+        if getattr(resource, "type", None) and str(resource.type).endswith("PDF")
+        else "text/html"
+    )
+    content = getattr(resource, "raw_content", None)
+    text_content = getattr(resource, "text", None)
+
+    return StoredDocument(
+        source_name=source_name,
+        source_url=(resource.meta or {}).get("listing_url"),
+        document_url=resource.url,
+        title=resource.title,
+        document_type="pdf" if mime_type == "application/pdf" else "html",
+        mime_type=mime_type,
+        content=content,
+        text_content=text_content,
+        external_id=resource.url,
+        metadata=resource.meta or {},
+    )
 
 
 def pick_best_text(resource):
@@ -238,51 +269,160 @@ def main():
 
     scrapers = build_scrapers(args.sites, max_pages=args.max_pages)
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(exist_ok=True)
+    storage = build_storage_backend()
 
-    all_results = {}
     all_summaries = {}
 
     for scraper in scrapers:
         scraper_name = scraper.__class__.__name__
-        results = run_scraper(scraper)
-        summary = compute_summary(results)
+        source_name = scraper_name
 
-        all_results[scraper_name] = results
-        all_summaries[scraper_name] = summary
+        logger.info("Running scraper: %s", scraper_name)
 
-        out_file = out_dir / f"{scraper_name}.json"
-        out_file.write_text(
-            json.dumps(results, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("Wrote %s", out_file)
+        # stats pour ce run
+        processed = inserted = skipped = errors = 0
+        results: list[dict] = []
 
-        summary_file = out_dir / f"{scraper_name}.summary.json"
-        summary_file.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("Wrote %s", summary_file)
+        # --- nouveau : début de run Snowflake ---
+        run_id = None
+        if hasattr(storage, "start_run"):
+            try:
+                run_id = storage.start_run(source_name=source_name, metadata=None)
+            except Exception as e:
+                logger.exception("Failed to start run for %s: %s", source_name, e)
+        # ----------------------------------------
 
-        log_summary(scraper_name, summary)
+        try:
+            # 1. collecter toutes les resources comme avant
+            raw_resources = []
+            for listing_url in scraper.iter_listing_urls():
+                logger.info("Listing: %s", listing_url)
 
+                resp = scraper.session.get(listing_url, timeout=30)
+                resp.raise_for_status()
+                resources = scraper.extract_resources_from_listing(
+                    resp.text, listing_url
+                )
+
+                logger.info("Found %d resources", len(resources))
+                raw_resources.extend(resources)
+
+            # 2. traiter les resources
+            for resource in raw_resources:
+                processed += 1
+                try:
+                    resource = scraper.extract_content(resource)
+                    serialized = serialize_resource(resource)
+                    results.append(serialized)
+
+                    doc_url = serialized.get("url")
+                    if hasattr(storage, "exists") and storage.exists(
+                        source_name=source_name, document_url=doc_url
+                    ):
+                        skipped += 1
+                        continue
+
+                    doc = map_resource_to_document(source_name, resource)
+                    storage.save_document(doc)
+                    inserted += 1
+
+                except Exception as e:
+                    errors += 1
+                    logger.exception("Failed on resource %s: %s", resource.url, e)
+
+                    serialized = {
+                        "title": resource.title,
+                        "url": resource.url,
+                        "type": getattr(resource.type, "value", str(resource.type)),
+                        "content_source": "error",
+                        "text": None,
+                        "pdf_url": (resource.meta or {}).get("pdf_url"),
+                        "listing_url": (resource.meta or {}).get("listing_url"),
+                        "source_html": (resource.meta or {}).get("source_html"),
+                        "meta": resource.meta or {},
+                        "error": str(e),
+                    }
+                    results.append(serialized)
+
+                    # --- nouveau : log_error Snowflake ---
+                    if run_id and hasattr(storage, "log_error"):
+                        try:
+                            from common_storage.models import StoredError
+
+                            err = StoredError(
+                                run_id=run_id,
+                                source_name=source_name,
+                                url=resource.url,
+                                step="extract_or_save",
+                                error_type=type(e).__name__,
+                                error_message=str(e),
+                                error_stack="",
+                                metadata=resource.meta or {},
+                            )
+                            storage.log_error(err)
+                        except Exception as log_e:
+                            logger.exception(
+                                "Failed to log error for %s: %s", resource.url, log_e
+                            )
+                    # -------------------------------------
+
+            # 3. résumé + logs
+            summary = compute_summary(results)
+            all_summaries[scraper_name] = summary
+            log_summary(scraper_name, summary)
+
+            logger.info(
+                "[%s] processed=%d | inserted=%d | skipped=%d | errors=%d",
+                scraper_name,
+                processed,
+                inserted,
+                skipped,
+                errors,
+            )
+
+            # --- nouveau : fin de run OK ---
+            if run_id and hasattr(storage, "finish_run"):
+                try:
+                    storage.finish_run(
+                        run_id=run_id,
+                        status="SUCCESS" if errors == 0 else "PARTIAL_SUCCESS",
+                        stats={
+                            "processed": processed,
+                            "inserted": inserted,
+                            "skipped": skipped,
+                            "errors": errors,
+                        },
+                        message=None,
+                    )
+                except Exception as e:
+                    logger.exception("Failed to finish run for %s: %s", source_name, e)
+            # --------------------------------
+
+        except Exception as e:
+            logger.exception("Fatal error in scraper %s: %s", scraper_name, e)
+
+            # --- nouveau : fin de run en échec ---
+            if run_id and hasattr(storage, "finish_run"):
+                try:
+                    storage.finish_run(
+                        run_id=run_id,
+                        status="FAILED",
+                        stats={
+                            "processed": processed,
+                            "inserted": inserted,
+                            "skipped": skipped,
+                            "errors": errors + 1,
+                        },
+                        message=str(e),
+                    )
+                except Exception as fe:
+                    logger.exception(
+                        "Failed to finish FAILED run for %s: %s", source_name, fe
+                    )
+            # -------------------------------------
+
+    # Si tu veux garder le behaviour multi-sites global, tu peux encore calculer un résumé global
     if len(scrapers) > 1:
-        merged_file = out_dir / "all_results.json"
-        merged_file.write_text(
-            json.dumps(all_results, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("Wrote %s", merged_file)
-
-        summaries_file = out_dir / "all_summaries.json"
-        summaries_file.write_text(
-            json.dumps(all_summaries, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        logger.info("Wrote %s", summaries_file)
-
         logger.info("==== Global summary ====")
         for scraper_name, summary in all_summaries.items():
             log_summary(scraper_name, summary)

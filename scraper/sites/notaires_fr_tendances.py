@@ -54,12 +54,11 @@ class NotairesFranceTendancesScraper(SiteScraper):
             resource.text = None
             return resource
 
-        data = resp.content
-        resource.raw_content = data
-
         if resource.type == ResourceType.HTML:
-            html = data.decode(resp.encoding or "utf-8", errors="ignore")
+            html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
+
+            resource.meta["article_url"] = resource.url
 
             title_node = soup.select_one("h1.article-h1__title")
             if title_node:
@@ -83,9 +82,46 @@ class NotairesFranceTendancesScraper(SiteScraper):
                 )
 
             resource.meta["html_text"] = html_text
+
+            pdf_url = self._extract_pdf_url(soup)
+            if pdf_url:
+                resource.meta["pdf_url"] = pdf_url
+                resource.meta["source_html"] = resource.url
+                logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+
+                pdf_resp = self.safe_get(pdf_url)
+                if pdf_resp is not None:
+                    resource.type = ResourceType.PDF
+                    resource.url = pdf_url
+                    resource.raw_content = pdf_resp.content
+                    resource.text = None
+                    return resource
+
+                resource.meta["pdf_error"] = "pdf_unavailable"
+            else:
+                logger.info("Resource: %s | PDF: none", resource.url)
+
+            resource.raw_content = resp.content
             resource.text = html_text
+            return resource
 
         elif resource.type == ResourceType.PDF:
+            resource.raw_content = resp.content
             resource.text = None
+            return resource
 
+        resource.raw_content = resp.content
+        resource.text = None
         return resource
+
+    def _extract_pdf_url(self, soup: BeautifulSoup) -> str | None:
+        for link in soup.select("a[href]"):
+            href = (link.get("href") or "").strip()
+            if not href:
+                continue
+
+            href_lower = href.lower()
+            if ".pdf" in href_lower:
+                return urljoin(self.base_url, href)
+
+        return None

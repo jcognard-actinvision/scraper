@@ -93,12 +93,45 @@ class SocieteGeneraleScraper(SiteScraper):
             resource.title = title
 
         resource.meta["source_html"] = resource.url
+        resource.meta["article_url"] = resource.url
 
+        extracted = None
         for strategy in DEFAULT_STRATEGIES:
             if strategy.matches(resource.url, soup):
                 resource.meta["strategy"] = strategy.__class__.__name__
-                return strategy.extract(resource, soup)
+                extracted = strategy.extract(resource, soup)
+                break
 
-        resource.meta["run_error"] = "No extraction strategy matched"
-        resource.text = None
+        if extracted is None:
+            resource.meta["run_error"] = "No extraction strategy matched"
+            resource.raw_content = resp.content
+            resource.text = None
+            return resource
+
+        resource = extracted
+        resource.meta = resource.meta or {}
+        resource.meta.setdefault(
+            "source_html", resource.meta.get("article_url", resource.url)
+        )
+        resource.meta.setdefault(
+            "article_url", resource.meta.get("source_html", resource.url)
+        )
+
+        pdf_url = resource.meta.get("pdf_url")
+
+        if pdf_url:
+            pdf_url = urljoin(self.base_url, pdf_url)
+            resource.meta["pdf_url"] = pdf_url
+
+            pdf_resp = self.safe_get(pdf_url)
+            if pdf_resp is not None:
+                resource.type = ResourceType.PDF
+                resource.url = pdf_url
+                resource.raw_content = pdf_resp.content
+                resource.text = None
+                return resource
+
+            resource.meta["pdf_error"] = "pdf_unavailable"
+
+        resource.raw_content = resp.content
         return resource

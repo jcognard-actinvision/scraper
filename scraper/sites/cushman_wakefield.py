@@ -149,6 +149,32 @@ class CushmanWakefieldScraper(SiteScraper):
     def extract_content(self, resource: Resource) -> Resource:
         resource.meta = resource.meta or {}
 
+        # Cas PDF : on télécharge juste le binaire, sans extraction de texte
+        if resource.type == ResourceType.PDF:
+            primary_url = self._prefer_public_cw_url(resource.url)
+            if not primary_url:
+                resource.meta["fetch_error"] = "no_pdf_url"
+                resource.text = None
+                return resource
+
+            logger.info("C&W: fetching PDF %s", primary_url)
+            try:
+                resp = self.session.get(primary_url, timeout=30)
+                resp.raise_for_status()
+            except Exception as exc:
+                logger.warning("C&W: failed to fetch PDF %s: %s", primary_url, exc)
+                resource.meta["fetch_error"] = str(exc)
+                resource.text = None
+                return resource
+
+            resource.url = primary_url
+            resource.raw_content = resp.content
+            resource.meta["fetched_url"] = primary_url
+            resource.meta["final_url"] = resp.url
+            resource.text = None
+            return resource
+
+        # Cas HTML : logique actuelle inchangée
         primary_url = self._prefer_public_cw_url(resource.url)
         fallback_url = self._prefer_public_cw_url(resource.meta.get("printable_uri"))
 
@@ -251,7 +277,6 @@ class CushmanWakefieldScraper(SiteScraper):
         if content_text:
             parts.append(content_text)
 
-        # Fallback contrôlé si page-summary/page-content-body absents ou vides
         if not parts:
             fallback_candidates = [
                 ".article-body",
@@ -330,10 +355,6 @@ class CushmanWakefieldScraper(SiteScraper):
     def _resource_from_result(
         self, item: dict[str, Any], listing_url: str
     ) -> Resource | None:
-        """
-        Transforme un item JSON Coveo en Resource.
-        Utilise en priorité clickUri (public www) et normalise les URLs.
-        """
         raw = item.get("raw", {}) or {}
 
         click_uri = item.get("clickUri") or raw.get("clickuri")
@@ -343,7 +364,6 @@ class CushmanWakefieldScraper(SiteScraper):
         sys_uri = raw.get("sysuri")
         uri = item.get("uri") or raw.get("uri")
 
-        # Titre
         title = (
             item.get("title")
             or raw.get("systitle")
@@ -351,7 +371,6 @@ class CushmanWakefieldScraper(SiteScraper):
             or raw.get("Title")
         )
 
-        # Choix d’URL : priorité à clickUri, puis printableUri, etc.
         url = self._prefer_public_cw_url(
             click_uri
             or printable_uri
@@ -366,13 +385,12 @@ class CushmanWakefieldScraper(SiteScraper):
             return None
 
         path = urlparse(url).path.lower()
-
-        # Optionnel : ignorer les pages personnes / propriétés
         if self._should_skip_path(path):
             logger.info("C&W: skipping non-article path %s", url)
             return None
 
-        # Résumé simple depuis l’API
+        filetype = (raw.get("filetype") or item.get("filetype") or "").lower()
+
         summary = (
             item.get("excerpt")
             or item.get("firstSentences")
@@ -388,7 +406,7 @@ class CushmanWakefieldScraper(SiteScraper):
             "sys_clickable_uri": self._prefer_public_cw_url(sys_clickable_uri),
             "sys_uri": self._prefer_public_cw_url(sys_uri),
             "api_uri": uri,
-            "filetype": raw.get("filetype") or item.get("filetype"),
+            "filetype": filetype,
             "category": raw.get("category") or item.get("category"),
             "template": raw.get("z95xtemplatename"),
             "date": item.get("date") or raw.get("date"),
@@ -400,12 +418,24 @@ class CushmanWakefieldScraper(SiteScraper):
         }
 
         logger.info(
-            "C&W: resource url=%s | click=%s | printable=%s",
+            "C&W: resource url=%s | click=%s | printable=%s | filetype=%s",
             url,
             meta["click_uri"],
             meta["printable_uri"],
+            filetype,
         )
 
+        # Si Coveo indique un PDF, on crée directement une ressource PDF
+        if filetype == "pdf" or url.lower().endswith(".pdf"):
+            return Resource(
+                url=url,
+                type=ResourceType.PDF,
+                title=self._clean_text(title) or url,
+                text=None,
+                meta=meta,
+            )
+
+        # Sinon, ressource HTML comme avant
         return Resource(
             url=url,
             type=ResourceType.HTML,

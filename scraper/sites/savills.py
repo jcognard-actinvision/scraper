@@ -86,10 +86,7 @@ class SavillsScraper(SiteScraper):
                     continue
                 seen_urls.add(full_url)
 
-                title = (
-                    article_title
-                    or full_url.rsplit("/", 1)[-1]
-                )
+                title = article_title or full_url.rsplit("/", 1)[-1]
 
                 resources.append(
                     Resource(
@@ -99,6 +96,7 @@ class SavillsScraper(SiteScraper):
                         meta={
                             "listing_url": url,
                             "pdf_url": full_url,
+                            "article_url": None,
                         },
                     )
                 )
@@ -117,4 +115,5 @@ class SavillsScraper(SiteScraper):
 
         resource.raw_content = resp.content
         resource.text = None
+        resource.meta.setdefault("pdf_url", resource.url)
         return resource

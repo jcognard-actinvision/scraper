@@ -77,24 +77,34 @@ class KnightFrankScraper(SiteScraper):
             resource.text = None
             return resource
 
-        data = resp.content
-        resource.raw_content = data
-
-        html = data.decode(resp.encoding or "utf-8", errors="ignore")
+        html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
         soup = BeautifulSoup(html, "html.parser")
+
+        resource.meta["article_url"] = resource.url
 
         title_node = soup.select_one("div.detailPublications h1")
         if title_node:
             resource.title = title_node.get_text(strip=True)
 
         btn = soup.select_one("a.btnRead[href]")
-        if btn:
+        if btn and btn.get("href"):
             pdf_url = urljoin(self.base_url, btn["href"])
             resource.meta["pdf_url"] = pdf_url
             resource.meta["source_html"] = resource.url
             logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+
+            pdf_resp = self.safe_get(pdf_url)
+            if pdf_resp is not None:
+                resource.type = ResourceType.PDF
+                resource.url = pdf_url
+                resource.raw_content = pdf_resp.content
+                resource.text = None
+                return resource
+
+            resource.meta["pdf_error"] = "pdf_unavailable"
         else:
             logger.info("Resource: %s | PDF: none", resource.url)
 
+        resource.raw_content = resp.content
         resource.text = None
         return resource

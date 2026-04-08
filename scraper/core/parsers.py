@@ -33,8 +33,3 @@ def clean_html_main(html, main_selector=None, remove_predicate=None) -> str:
                 continue
 
     return main.get_text(separator="\n", strip=True)
-
-
-def extract_pdf_text(data: bytes) -> str:
-    # Placeholder: implémenter avec pdfplumber/pypdf selon ton besoin
-    return ""

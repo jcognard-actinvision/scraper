@@ -25,15 +25,10 @@ class LaBanquePostaleScraper(SiteScraper):
         self.max_pages = max_pages
 
     def iter_listing_urls(self) -> Iterable[str]:
-        """
-        Pour chaque URL de base dans LISTING_URLS (rebond, actu-eco, etc.),
-        on génère rebond.p-1.html, rebond.p-2.html, ... jusqu'à ce qu'il n'y ait plus de ressources
-        ou qu'on atteigne max_pages.
-        """
         max_pages = getattr(self, "max_pages", None)
 
         for base in LISTING_URLS:
-            page = 1  # les URLs existantes sont déjà en .p-1.html
+            page = 1
 
             while True:
                 if max_pages is not None and page > max_pages:
@@ -77,48 +72,61 @@ class LaBanquePostaleScraper(SiteScraper):
         return resources
 
     def extract_content(self, resource: Resource) -> Resource:
-        resp = self.session.get(resource.url, timeout=30)
-        resp.raise_for_status()
-        data = resp.content
-        resource.raw_content = data
         resource.meta = resource.meta or {}
 
+        resp = self.safe_get(resource.url)
+        if resp is None:
+            resource.meta["fetch_error"] = "html_unavailable"
+            resource.text = None
+            return resource
+
         if resource.type == ResourceType.HTML:
-            html = data.decode(resp.encoding or "utf-8", errors="ignore")
+            html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
 
-            # Titre propre
+            resource.meta["article_url"] = resource.url
+
             h1 = soup.find("h1")
             if h1:
                 resource.title = h1.get_text(strip=True)
 
-            # Contenu HTML (optionnel)
             main_container = soup.find("main") or soup.body or soup
             html_text = main_container.get_text(separator="\n", strip=True)
             resource.meta["html_text"] = html_text
-            resource.text = html_text
 
-            # Lien PDF
             pdf_link = soup.select_one("div.m-cta--download a.m-cta[href]")
-            if pdf_link:
+            if pdf_link and pdf_link.get("href"):
                 pdf_url = urljoin(self.base_url, pdf_link["href"])
                 resource.meta["pdf_url"] = pdf_url
                 resource.meta["source_html"] = resource.url
                 logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+
+                pdf_resp = self.safe_get(pdf_url)
+                if pdf_resp is not None:
+                    resource.type = ResourceType.PDF
+                    resource.url = pdf_url
+                    resource.raw_content = pdf_resp.content
+                    resource.text = None
+                    return resource
+
+                resource.meta["pdf_error"] = "pdf_unavailable"
             else:
                 logger.info("Resource: %s | PDF: none", resource.url)
 
-        elif resource.type == ResourceType.PDF:
-            # Tu ne veux pas extraire le contenu PDF pour l'instant
-            resource.text = None
+            resource.raw_content = resp.content
+            resource.text = html_text
+            return resource
 
+        elif resource.type == ResourceType.PDF:
+            resource.raw_content = resp.content
+            resource.text = None
+            return resource
+
+        resource.raw_content = resp.content
+        resource.text = None
         return resource
 
     def _with_page(self, base: str, page: int) -> str:
-        """
-        Transforme rebond.p-1.html -> rebond.p-<page>.html
-        en remplaçant la partie .p-<n>.html de façon robuste.
-        """
         parsed = urlparse(base)
         path = parsed.path
 

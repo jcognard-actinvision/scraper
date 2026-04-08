@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 
 from scraper.core.base_site import SiteScraper
 from scraper.core.models import Resource, ResourceType
-from scraper.core.parsers import extract_pdf_text
 
 logger = logging.getLogger("scraper.observatoire")
 
@@ -60,12 +59,12 @@ class ObservatoireCreditLogementScraper(SiteScraper):
     def extract_content(self, resource: Resource) -> Resource:
         resp = self.session.get(resource.url, timeout=30)
         resp.raise_for_status()
-        data = resp.content
-        resource.raw_content = data
+
         resource.meta = resource.meta or {}
+        resource.meta["article_url"] = resource.url
 
         if resource.type == ResourceType.HTML:
-            html = data.decode(resp.encoding or "utf-8", errors="ignore")
+            html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
 
             title_tag = soup.find(["h1", "h2"])
@@ -85,8 +84,10 @@ class ObservatoireCreditLogementScraper(SiteScraper):
             box = soup.find("div", class_="box-download")
             if box:
                 a = box.find("a", href=True)
-                if a and a["href"].lower().endswith(".pdf"):
-                    pdf_url = urljoin(self.base_url, a["href"])
+                if a and a["href"]:
+                    candidate = urljoin(self.base_url, a["href"])
+                    if candidate.lower().endswith(".pdf"):
+                        pdf_url = candidate
 
             if pdf_url:
                 resource.meta["pdf_url"] = pdf_url
@@ -95,19 +96,25 @@ class ObservatoireCreditLogementScraper(SiteScraper):
                 try:
                     pdf_resp = self.session.get(pdf_url, timeout=30)
                     pdf_resp.raise_for_status()
-                    pdf_data = pdf_resp.content
-                    pdf_text = extract_pdf_text(pdf_data)
-                    resource.meta["pdf_text"] = pdf_text
-                    resource.text = pdf_text or html_text
+
+                    resource.type = ResourceType.PDF
+                    resource.url = pdf_url
+                    resource.raw_content = pdf_resp.content
+                    resource.text = None
+                    return resource
+
                 except Exception as e:
-                    logger.warning("Failed to fetch/extract PDF %s: %s", pdf_url, e)
-                    resource.text = html_text
-            else:
-                resource.text = html_text
+                    logger.warning("Failed to fetch PDF %s: %s", pdf_url, e)
+
+            resource.raw_content = resp.content
+            resource.text = html_text
+            return resource
 
         elif resource.type == ResourceType.PDF:
-            pdf_text = extract_pdf_text(data)
-            resource.meta["pdf_text"] = pdf_text
-            resource.text = pdf_text
+            resource.raw_content = resp.content
+            resource.text = None
+            return resource
 
+        resource.raw_content = resp.content
+        resource.text = None
         return resource

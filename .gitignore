@@ -4,6 +4,10 @@ __pycache/
 
 /gmail_output/
 /output/
-/gmail_fetcher/config.yaml
-/gmail_fetcher/credentials.json
-/gmail_fetcher/token.json
+/output_docker/
+/keys/
+/gmail_tokens/credentials.json
+/gmail_tokens/token.json
+*.p8
+.env.local
+.env.snowflake

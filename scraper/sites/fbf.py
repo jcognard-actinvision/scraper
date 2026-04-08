@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 
 from scraper.core.base_site import SiteScraper
 from scraper.core.models import Resource, ResourceType
-from scraper.core.parsers import extract_pdf_text
 
 logger = logging.getLogger("scraper.fbf")
 
@@ -36,15 +35,19 @@ class FBFScraper(SiteScraper):
         return resources
 
     def extract_content(self, resource: Resource) -> Resource:
-        resp = self.session.get(resource.url, timeout=30)
-        resp.raise_for_status()
-        data = resp.content
-        resource.raw_content = data
         resource.meta = resource.meta or {}
 
+        resp = self.safe_get(resource.url)
+        if resp is None:
+            resource.meta["fetch_error"] = "html_unavailable"
+            resource.text = None
+            return resource
+
         if resource.type == ResourceType.HTML:
-            html = data.decode(resp.encoding or "utf-8", errors="ignore")
+            html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
+
+            resource.meta["article_url"] = resource.url
 
             h1 = soup.find("h1")
             if h1:
@@ -60,26 +63,29 @@ class FBFScraper(SiteScraper):
                 resource.meta["pdf_url"] = pdf_url
                 resource.meta["source_html"] = resource.url
 
-                # ligne de log homogène avec ObservatoireCreditLogementScraper
                 logger.info("PDF for %s: %s", resource.url, pdf_url)
 
-                try:
-                    pdf_resp = self.session.get(pdf_url, timeout=30)
-                    pdf_resp.raise_for_status()
-                    pdf_data = pdf_resp.content
-                    pdf_text = extract_pdf_text(pdf_data)
-                    resource.meta["pdf_text"] = pdf_text
-                    resource.text = pdf_text or html_text
-                except Exception:
-                    resource.text = html_text
-            else:
-                resource.text = html_text
+                pdf_resp = self.safe_get(pdf_url)
+                if pdf_resp is not None:
+                    resource.type = ResourceType.PDF
+                    resource.url = pdf_url
+                    resource.raw_content = pdf_resp.content
+                    resource.text = None
+                    return resource
+
+                resource.meta["pdf_error"] = "pdf_unavailable"
+
+            resource.raw_content = resp.content
+            resource.text = html_text
+            return resource
 
         elif resource.type == ResourceType.PDF:
-            pdf_text = extract_pdf_text(data)
-            resource.meta["pdf_text"] = pdf_text
-            resource.text = pdf_text
+            resource.raw_content = resp.content
+            resource.text = None
+            return resource
 
+        resource.raw_content = resp.content
+        resource.text = None
         return resource
 
     def _fetch_more_listing_pages(

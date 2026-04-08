@@ -90,29 +90,49 @@ class SimplePdfListingScraper(SiteScraper):
 
         if self.config.pdf_selector is None:
             # lien direct PDF
-            resp = self.session.get(resource.url, timeout=30)
-            resp.raise_for_status()
+            resp = self.safe_get(resource.url)
+            if resp is None:
+                resource.meta["fetch_error"] = "pdf_unavailable"
+                resource.text = None
+                resource.raw_content = None
+                return resource
+
             resource.raw_content = resp.content
             resource.text = None
             resource.meta["pdf_url"] = resource.url
             return resource
 
         # Sinon, on doit aller chercher le PDF dans la page article
-        resp = self.session.get(resource.url, timeout=30)
-        resp.raise_for_status()
+        resp = self.safe_get(resource.url)
+        if resp is None:
+            resource.meta["fetch_error"] = "html_unavailable"
+            resource.text = None
+            resource.raw_content = None
+            return resource
+
         soup = BeautifulSoup(resp.text, "html.parser")
+        resource.meta["article_url"] = resource.url
 
         pdf_link = soup.select_one(self.config.pdf_selector)
         if not pdf_link or not pdf_link.get("href"):
             resource.meta["pdf_error"] = "PDF link not found with selector"
             resource.text = None
-            resource.raw_content = None
+            resource.raw_content = resp.content
             return resource
 
         pdf_url = urljoin(resource.url, pdf_link["href"])
+        pdf_resp = self.safe_get(pdf_url)
+        if pdf_resp is None:
+            resource.meta["pdf_url"] = pdf_url
+            resource.meta["pdf_error"] = "pdf_unavailable"
+            resource.text = None
+            resource.raw_content = resp.content
+            return resource
+
         resource.url = pdf_url
         resource.type = ResourceType.PDF
         resource.meta["pdf_url"] = pdf_url
+        resource.meta["source_html"] = resource.meta.get("article_url")
         resource.text = None
-        resource.raw_content = None
+        resource.raw_content = pdf_resp.content
         return resource

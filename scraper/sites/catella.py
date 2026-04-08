@@ -62,4 +62,5 @@ class CatellaScraper(SiteScraper):
 
         resource.raw_content = resp.content
         resource.text = None
+        resource.meta.setdefault("pdf_url", resource.url)
         return resource

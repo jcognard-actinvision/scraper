@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml  # pip install pyyaml
+
+from common_runtime.settings import Settings
+from common_storage.local import LocalStorage
+from common_storage.models import StoredDocument, StoredError
+from common_storage.snowflake import SnowflakeStorage
 
 from .gmail_client import (
     decode_body_part,
@@ -16,8 +22,31 @@ from .gmail_client import (
 
 
 def load_config(path: str = "gmail_fetcher/config.yaml") -> dict[str, Any]:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    file_cfg: dict[str, Any] = {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            file_cfg = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        file_cfg = {}
+
+    return {
+        "source_name": os.getenv(
+            "GMAIL_SOURCE_NAME", file_cfg.get("source_name", "gmail_fetcher")
+        ),
+        "user_id": os.getenv("GMAIL_USER_ID", file_cfg.get("user_id", "me")),
+        "label_id": os.getenv("GMAIL_LABEL_ID", file_cfg.get("label_id")),
+        "credentials_path": os.getenv(
+            "GMAIL_CREDENTIALS_PATH",
+            file_cfg.get("credentials_path", "credentials.json"),
+        ),
+        "token_path": os.getenv(
+            "GMAIL_TOKEN_PATH", file_cfg.get("token_path", "token.json")
+        ),
+        "output_dir": os.getenv(
+            "GMAIL_OUTPUT_DIR", file_cfg.get("output_dir", "gmail_output")
+        ),
+    }
 
 
 def ensure_dir(path: Path) -> Path:
@@ -95,57 +124,181 @@ def iter_attachments_pdf(service, user_id: str, msg: dict):
         yield filename or f"{msg_id}.pdf", file_bytes
 
 
+def email_to_document(source_name: str, message: dict) -> StoredDocument:
+    message_id = message["id"]
+    payload = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    return StoredDocument(
+        source_name=source_name,
+        source_url=None,
+        document_url=f"gmail://message/{message_id}",
+        title=message.get("subject"),
+        document_type="json",
+        mime_type="application/json",
+        content=payload,
+        text_content=message.get("body_text"),
+        external_id=message_id,
+        metadata=message,
+    )
+
+
+def attachment_to_document(
+    source_name: str, message_id: str, attachment: dict
+) -> StoredDocument:
+    attachment_id = attachment["attachment_id"]
+    return StoredDocument(
+        source_name=source_name,
+        source_url=None,
+        document_url=f"gmail://message/{message_id}/attachment/{attachment_id}",
+        title=attachment.get("filename"),
+        document_type="pdf",
+        mime_type="application/pdf",
+        content=attachment["content"],
+        text_content=None,
+        external_id=f"{message_id}:{attachment_id}",
+        metadata={
+            "message_id": message_id,
+            "filename": attachment.get("filename"),
+        },
+    )
+
+
 def main():
     cfg = load_config()
+    source_name = cfg.get("source_name", "gmail_fetcher")
     user_id = cfg.get("user_id", "me")
     label_id = cfg["label_id"]
     creds_path = cfg.get("credentials_path", "credentials.json")
     token_path = cfg.get("token_path", "token.json")
     output_dir = ensure_dir(Path(cfg.get("output_dir", "gmail_output")))
 
+    if Settings.storage_backend == "snowflake":
+        storage = SnowflakeStorage.from_env()
+    else:
+        storage = LocalStorage(output_dir=output_dir)
+
     service = get_gmail_service(credentials_path=creds_path, token_path=token_path)
 
     results: list[dict[str, Any]] = []
+    processed = inserted = skipped = errors = 0
 
-    for msg_meta in iter_messages_by_label(service, user_id, label_id):
-        msg_id = msg_meta["id"]
-        full = get_message_full(service, user_id, msg_id)
+    run_id = None
+    if hasattr(storage, "start_run"):
+        try:
+            run_id = storage.start_run(
+                source_name=source_name,
+                metadata={"label_id": label_id},
+            )
+        except Exception:
+            run_id = None
 
-        headers = {
-            h["name"].lower(): h["value"]
-            for h in full.get("payload", {}).get("headers", []) or []
-        }
-        subject = headers.get("subject")
-        date = headers.get("date")
-        frm = headers.get("from")
+    try:
+        for msg_meta in iter_messages_by_label(service, user_id, label_id):
+            msg_id = msg_meta["id"]
+            try:
+                full = get_message_full(service, user_id, msg_id)
 
-        # Corps
-        body = extract_main_body(full.get("payload", {}) or {})
+                headers = {
+                    h["name"].lower(): h["value"]
+                    for h in full.get("payload", {}).get("headers", []) or []
+                }
+                subject = headers.get("subject")
+                date = headers.get("date")
+                frm = headers.get("from")
 
-        # Pièces jointes PDF
-        pdf_files = []
-        for filename, data in iter_attachments_pdf(service, user_id, full):
-            safe_name = f"{msg_id}_{filename}".replace("/", "_")
-            pdf_path = output_dir / safe_name
-            pdf_path.write_bytes(data)
-            pdf_files.append(str(pdf_path.name))
+                body = extract_main_body(full.get("payload", {}) or {})
 
-        result = {
-            "id": msg_id,
-            "subject": subject,
-            "date": date,
-            "from": frm,
-            "label_id": label_id,
-            "body_text": body["text"],
-            "body_html": body["html"],
-            "pdf_attachments": pdf_files,
-        }
-        results.append(result)
+                pdf_attachments: list[dict[str, Any]] = []
+                for idx, (filename, data) in enumerate(
+                    iter_attachments_pdf(service, user_id, full),
+                    start=1,
+                ):
+                    pdf_attachments.append(
+                        {
+                            "attachment_id": str(idx),
+                            "filename": filename,
+                            "content": data,
+                        }
+                    )
 
-    # Dump global JSON
+                result = {
+                    "id": msg_id,
+                    "subject": subject,
+                    "date": date,
+                    "from": frm,
+                    "label_id": label_id,
+                    "body_text": body["text"],
+                    "body_html": body["html"],
+                    "pdf_attachments": [a["filename"] for a in pdf_attachments],
+                }
+                results.append(result)
+                processed += 1
+
+                if hasattr(storage, "exists") and storage.exists(
+                    source_name=source_name,
+                    external_id=msg_id,
+                ):
+                    skipped += 1
+                else:
+                    storage.save_document(email_to_document(source_name, result))
+                    inserted += 1
+
+                for attachment in pdf_attachments:
+                    att_external_id = f"{msg_id}:{attachment['attachment_id']}"
+                    att_doc = {
+                        "attachment_id": attachment["attachment_id"],
+                        "filename": attachment["filename"],
+                        "content": attachment["content"],
+                    }
+                    if hasattr(storage, "exists") and storage.exists(
+                        source_name=source_name,
+                        external_id=att_external_id,
+                    ):
+                        continue
+                    storage.save_document(
+                        attachment_to_document(source_name, msg_id, att_doc)
+                    )
+
+            except Exception as e:
+                errors += 1
+                if hasattr(storage, "log_error"):
+                    storage.log_error(
+                        StoredError(
+                            run_id=run_id or "",
+                            source_name=source_name,
+                            url=f"gmail://message/{msg_id}",
+                            step="gmail_fetcher.main",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
+                            error_stack="",
+                            metadata={"label_id": label_id},
+                        )
+                    )
+
+    finally:
+        if run_id and hasattr(storage, "finish_run"):
+            try:
+                storage.finish_run(
+                    run_id=run_id,
+                    status="SUCCESS" if errors == 0 else "PARTIAL_SUCCESS",
+                    stats={
+                        "processed": processed,
+                        "inserted": inserted,
+                        "skipped": skipped,
+                        "errors": errors,
+                    },
+                    message=None,
+                )
+            except Exception:
+                pass
+
     out_json = output_dir / "gmail_label_dump.json"
     out_json.write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    print(
+        f"[gmail_fetcher] processed={processed}, inserted={inserted}, "
+        f"skipped={skipped}, errors={errors}"
     )
 
 
