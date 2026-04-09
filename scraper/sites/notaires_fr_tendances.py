@@ -58,7 +58,8 @@ class NotairesFranceTendancesScraper(SiteScraper):
             html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
 
-            resource.meta["article_url"] = resource.url
+            article_url = resource.url
+            resource.meta["article_url"] = article_url
 
             title_node = soup.select_one("h1.article-h1__title")
             if title_node:
@@ -86,13 +87,12 @@ class NotairesFranceTendancesScraper(SiteScraper):
             pdf_url = self._extract_pdf_url(soup)
             if pdf_url:
                 resource.meta["pdf_url"] = pdf_url
-                resource.meta["source_html"] = resource.url
-                logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+                resource.meta["source_html"] = article_url
+                logger.info("Resource: %s | PDF: %s", article_url, pdf_url)
 
                 pdf_resp = self.safe_get(pdf_url)
                 if pdf_resp is not None:
                     resource.type = ResourceType.PDF
-                    resource.url = pdf_url
                     resource.raw_content = pdf_resp.content
                     resource.text = None
                     return resource

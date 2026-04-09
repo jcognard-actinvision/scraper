@@ -44,10 +44,11 @@ class FBFScraper(SiteScraper):
             return resource
 
         if resource.type == ResourceType.HTML:
+            article_url = resource.url
             html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
 
-            resource.meta["article_url"] = resource.url
+            resource.meta["article_url"] = article_url
 
             h1 = soup.find("h1")
             if h1:
@@ -61,14 +62,13 @@ class FBFScraper(SiteScraper):
             if pdf_link:
                 pdf_url = urljoin(self.base_url, pdf_link["href"])
                 resource.meta["pdf_url"] = pdf_url
-                resource.meta["source_html"] = resource.url
+                resource.meta["source_html"] = article_url
 
-                logger.info("PDF for %s: %s", resource.url, pdf_url)
+                logger.info("PDF for %s: %s", article_url, pdf_url)
 
                 pdf_resp = self.safe_get(pdf_url)
                 if pdf_resp is not None:
                     resource.type = ResourceType.PDF
-                    resource.url = pdf_url
                     resource.raw_content = pdf_resp.content
                     resource.text = None
                     return resource
@@ -79,7 +79,7 @@ class FBFScraper(SiteScraper):
             resource.text = html_text
             return resource
 
-        elif resource.type == ResourceType.PDF:
+        if resource.type == ResourceType.PDF:
             resource.raw_content = resp.content
             resource.text = None
             return resource

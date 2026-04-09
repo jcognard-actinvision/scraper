@@ -96,7 +96,6 @@ class KnightFrankScraper(SiteScraper):
             pdf_resp = self.safe_get(pdf_url)
             if pdf_resp is not None:
                 resource.type = ResourceType.PDF
-                resource.url = pdf_url
                 resource.raw_content = pdf_resp.content
                 resource.text = None
                 return resource

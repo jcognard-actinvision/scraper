@@ -1,5 +1,6 @@
 import argparse
 import logging
+from urllib.parse import urlsplit, urlunsplit
 
 from common_runtime.notifications import send_error_notification
 from common_runtime.settings import Settings
@@ -49,6 +50,24 @@ SCRAPER_REGISTRY = {
     "aspim": AspimScraper,
     "bnppre_market_france": BNPPREMarketFranceScraper,
 }
+
+
+def canonicalize_url(url: str | None) -> str | None:
+    if not url:
+        return url
+
+    parts = urlsplit(url.strip())
+    scheme = (parts.scheme or "https").lower()
+    netloc = (parts.netloc or "").lower()
+
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    path = parts.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 
 def build_scrapers(site_names=None, max_pages: int | None = None):
@@ -109,20 +128,26 @@ def map_resource_to_document(source_name: str, resource) -> StoredDocument:
         if getattr(resource, "type", None) and str(resource.type).endswith("PDF")
         else "text/html"
     )
-    content = getattr(resource, "raw_content", None)
-    text_content = getattr(resource, "text", None)
+
+    canonical_document_url = canonicalize_url(resource.url)
+    canonical_source_url = canonicalize_url((resource.meta or {}).get("listing_url"))
 
     return StoredDocument(
         source_name=source_name,
-        source_url=(resource.meta or {}).get("listing_url"),
-        document_url=resource.url,
+        source_url=canonical_source_url,
+        document_url=canonical_document_url,
         title=resource.title,
         document_type="pdf" if mime_type == "application/pdf" else "html",
         mime_type=mime_type,
-        content=content,
-        text_content=text_content,
-        external_id=resource.url,
-        metadata=resource.meta or {},
+        content=getattr(resource, "raw_content", None),
+        text_content=getattr(resource, "text", None),
+        external_id=canonical_document_url,
+        metadata={
+            **(resource.meta or {}),
+            "canonical_document_url": canonical_document_url,
+            "canonical_source_url": canonical_source_url,
+            "original_document_url": resource.url,
+        },
     )
 
 
@@ -148,17 +173,24 @@ def pick_best_text(resource):
 def serialize_resource(resource):
     meta = resource.meta or {}
     best_text, content_source = pick_best_text(resource)
+    canonical_document_url = canonicalize_url(resource.url)
+    canonical_listing_url = canonicalize_url(meta.get("listing_url"))
 
     return {
         "title": resource.title,
-        "url": resource.url,
+        "url": canonical_document_url,
+        "original_url": resource.url,
         "type": getattr(resource.type, "value", str(resource.type)),
         "content_source": content_source,
         "text": best_text,
         "pdf_url": meta.get("pdf_url"),
-        "listing_url": meta.get("listing_url"),
+        "listing_url": canonical_listing_url,
         "source_html": meta.get("source_html"),
-        "meta": meta,
+        "meta": {
+            **meta,
+            "canonical_document_url": canonical_document_url,
+            "canonical_listing_url": canonical_listing_url,
+        },
     }
 
 
@@ -174,12 +206,16 @@ def compute_summary(results):
         "fetch_error": 0,
         "pdf_error": 0,
         "run_error": 0,
+        "skipped_incremental": 0,
     }
 
     for item in results:
         text = item.get("text")
         meta = item.get("meta") or {}
         content_source = item.get("content_source")
+
+        if item.get("skipped_incremental"):
+            summary["skipped_incremental"] += 1
 
         if text and str(text).strip():
             summary["with_text"] += 1
@@ -213,7 +249,8 @@ def log_summary(scraper_name, summary):
         (
             "[%s] total=%d | with_text=%d | without_text=%d | "
             "source_pdf=%d | source_html=%d | other=%d | "
-            "pdf_url=%d | fetch_error=%d | pdf_error=%d | run_error=%d"
+            "pdf_url=%d | fetch_error=%d | pdf_error=%d | "
+            "run_error=%d | skipped_incremental=%d"
         ),
         scraper_name,
         summary["total"],
@@ -226,6 +263,7 @@ def log_summary(scraper_name, summary):
         summary["fetch_error"],
         summary["pdf_error"],
         summary["run_error"],
+        summary["skipped_incremental"],
     )
 
 
@@ -251,11 +289,23 @@ def parse_args():
         default=None,
         help="Max number of listing pages per site (default: no limit)",
     )
+    parser.add_argument(
+        "--list-sites",
+        action="store_true",
+        help="Lister les sites disponibles et quitter",
+    )
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.list_sites:
+        print("Available sites:")
+        for name in SCRAPER_REGISTRY.keys():
+            print(f"- {name}")
+        return
 
     scrapers = build_scrapers(args.sites, max_pages=args.max_pages)
     storage = build_storage_backend(output_dir=args.output_dir)
@@ -282,21 +332,26 @@ def main():
                 logger.exception("Failed to start run for %s: %s", source_name, e)
 
         try:
-            raw_resources = []
+            stop_after_listing = False
 
             for listing_url in scraper.iter_listing_urls():
+                if stop_after_listing:
+                    logger.info(
+                        "[%s] incremental stop activated, skipping remaining listings",
+                        scraper_name,
+                    )
+                    break
+
                 logger.info("Listing: %s", listing_url)
 
                 try:
                     resp = scraper.session.get(listing_url, timeout=30)
                     resp.raise_for_status()
-
                     resources = scraper.extract_resources_from_listing(
-                        resp.text, listing_url
+                        resp.text,
+                        listing_url,
                     )
                     logger.info("Found %d resources", len(resources))
-                    raw_resources.extend(resources)
-
                 except Exception as e:
                     errors += 1
                     logger.exception("Failed on listing %s: %s", listing_url, e)
@@ -304,13 +359,14 @@ def main():
                     err = StoredError(
                         run_id=run_id or "",
                         source_name=source_name,
-                        url=listing_url,
+                        url=canonicalize_url(listing_url),
                         step="listing_fetch",
                         error_type=type(e).__name__,
                         error_message=str(e),
                         error_stack="",
                         metadata={
-                            "listing_url": listing_url,
+                            "listing_url": canonicalize_url(listing_url),
+                            "original_listing_url": listing_url,
                             "scraper": scraper_name,
                             "max_pages": args.max_pages,
                         },
@@ -318,55 +374,177 @@ def main():
                     log_and_notify_error(storage, err)
                     continue
 
-            for resource in raw_resources:
-                processed += 1
+                if not resources:
+                    logger.info(
+                        "[%s] no resources found on listing %s",
+                        scraper_name,
+                        listing_url,
+                    )
+                    continue
 
-                try:
-                    resource = scraper.extract_content(resource)
-                    serialized = serialize_resource(resource)
-                    results.append(serialized)
+                known_in_listing = 0
+                new_in_listing = 0
 
-                    doc_url = serialized.get("url")
-                    if hasattr(storage, "exists") and storage.exists(
-                        source_name=source_name,
-                        document_url=doc_url,
-                    ):
+                for resource in resources:
+                    processed += 1
+
+                    original_doc_url = resource.url
+                    doc_url = canonicalize_url(original_doc_url)
+                    already_exists = False
+
+                    try:
+                        logger.info(
+                            "[%s] exists check | source_name=%s | original_url=%s | canonical_url=%s",
+                            scraper_name,
+                            source_name,
+                            original_doc_url,
+                            doc_url,
+                        )
+
+                        if hasattr(storage, "exists"):
+                            already_exists = storage.exists(
+                                source_name=source_name,
+                                document_url=doc_url,
+                            )
+
+                        logger.info(
+                            "[%s] exists result | canonical_url=%s | already_exists=%s",
+                            scraper_name,
+                            doc_url,
+                            already_exists,
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "Failed during exists() check for %s: %s",
+                            doc_url,
+                            e,
+                        )
+                        err = StoredError(
+                            run_id=run_id or "",
+                            source_name=source_name,
+                            url=doc_url,
+                            step="exists_check",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
+                            error_stack="",
+                            metadata={
+                                **(resource.meta or {}),
+                                "original_document_url": original_doc_url,
+                                "canonical_document_url": doc_url,
+                            },
+                        )
+                        log_and_notify_error(storage, err)
+
+                    if already_exists:
                         skipped += 1
+                        known_in_listing += 1
+                        logger.info(
+                            "[%s] incremental skip before extract_content: %s",
+                            scraper_name,
+                            doc_url,
+                        )
+                        results.append(
+                            {
+                                "title": resource.title,
+                                "url": doc_url,
+                                "original_url": original_doc_url,
+                                "type": getattr(
+                                    resource.type, "value", str(resource.type)
+                                ),
+                                "content_source": "skipped_incremental",
+                                "text": None,
+                                "pdf_url": (resource.meta or {}).get("pdf_url"),
+                                "listing_url": canonicalize_url(
+                                    (resource.meta or {}).get("listing_url")
+                                ),
+                                "source_html": (resource.meta or {}).get("source_html"),
+                                "meta": {
+                                    **(resource.meta or {}),
+                                    "canonical_document_url": doc_url,
+                                    "original_document_url": original_doc_url,
+                                },
+                                "skipped_incremental": True,
+                            }
+                        )
                         continue
 
-                    doc = map_resource_to_document(source_name, resource)
-                    storage.save_document(doc)
-                    inserted += 1
+                    new_in_listing += 1
 
-                except Exception as e:
-                    errors += 1
-                    logger.exception("Failed on resource %s: %s", resource.url, e)
+                    try:
+                        logger.info(
+                            "[%s] extracting new resource: %s",
+                            scraper_name,
+                            doc_url,
+                        )
+                        resource = scraper.extract_content(resource)
+                        serialized = serialize_resource(resource)
+                        results.append(serialized)
 
-                    serialized = {
-                        "title": resource.title,
-                        "url": resource.url,
-                        "type": getattr(resource.type, "value", str(resource.type)),
-                        "content_source": "error",
-                        "text": None,
-                        "pdf_url": (resource.meta or {}).get("pdf_url"),
-                        "listing_url": (resource.meta or {}).get("listing_url"),
-                        "source_html": (resource.meta or {}).get("source_html"),
-                        "meta": resource.meta or {},
-                        "error": str(e),
-                    }
-                    results.append(serialized)
+                        doc = map_resource_to_document(source_name, resource)
+                        storage.save_document(doc)
+                        inserted += 1
+                    except Exception as e:
+                        errors += 1
+                        logger.exception(
+                            "Failed on resource %s: %s",
+                            original_doc_url,
+                            e,
+                        )
 
-                    err = StoredError(
-                        run_id=run_id or "",
-                        source_name=source_name,
-                        url=resource.url,
-                        step="extract_or_save",
-                        error_type=type(e).__name__,
-                        error_message=str(e),
-                        error_stack="",
-                        metadata=resource.meta or {},
+                        results.append(
+                            {
+                                "title": resource.title,
+                                "url": doc_url,
+                                "original_url": original_doc_url,
+                                "type": getattr(
+                                    resource.type, "value", str(resource.type)
+                                ),
+                                "content_source": "error",
+                                "text": None,
+                                "pdf_url": (resource.meta or {}).get("pdf_url"),
+                                "listing_url": canonicalize_url(
+                                    (resource.meta or {}).get("listing_url")
+                                ),
+                                "source_html": (resource.meta or {}).get("source_html"),
+                                "meta": {
+                                    **(resource.meta or {}),
+                                    "canonical_document_url": doc_url,
+                                    "original_document_url": original_doc_url,
+                                },
+                                "error": str(e),
+                            }
+                        )
+
+                        err = StoredError(
+                            run_id=run_id or "",
+                            source_name=source_name,
+                            url=doc_url,
+                            step="extract_or_save",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
+                            error_stack="",
+                            metadata={
+                                **(resource.meta or {}),
+                                "canonical_document_url": doc_url,
+                                "original_document_url": original_doc_url,
+                            },
+                        )
+                        log_and_notify_error(storage, err)
+
+                logger.info(
+                    "[%s] listing summary | listing_url=%s | new=%d | known=%d",
+                    scraper_name,
+                    canonicalize_url(listing_url),
+                    new_in_listing,
+                    known_in_listing,
+                )
+
+                if known_in_listing == len(resources):
+                    logger.info(
+                        "[%s] all resources in listing already known; stopping incremental run",
+                        scraper_name,
                     )
-                    log_and_notify_error(storage, err)
+                    stop_after_listing = True
 
             summary = compute_summary(results)
             all_summaries[scraper_name] = summary

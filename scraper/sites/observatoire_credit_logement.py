@@ -61,11 +61,14 @@ class ObservatoireCreditLogementScraper(SiteScraper):
         resp.raise_for_status()
 
         resource.meta = resource.meta or {}
-        resource.meta["article_url"] = resource.url
 
         if resource.type == ResourceType.HTML:
+            article_url = resource.url
+
             html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
+
+            resource.meta["article_url"] = article_url
 
             title_tag = soup.find(["h1", "h2"])
             if title_tag:
@@ -91,14 +94,14 @@ class ObservatoireCreditLogementScraper(SiteScraper):
 
             if pdf_url:
                 resource.meta["pdf_url"] = pdf_url
-                logger.info("PDF for %s: %s", resource.url, pdf_url)
+                resource.meta["source_html"] = article_url
+                logger.info("PDF for %s: %s", article_url, pdf_url)
 
                 try:
                     pdf_resp = self.session.get(pdf_url, timeout=30)
                     pdf_resp.raise_for_status()
 
                     resource.type = ResourceType.PDF
-                    resource.url = pdf_url
                     resource.raw_content = pdf_resp.content
                     resource.text = None
                     return resource
@@ -109,12 +112,3 @@ class ObservatoireCreditLogementScraper(SiteScraper):
             resource.raw_content = resp.content
             resource.text = html_text
             return resource
-
-        elif resource.type == ResourceType.PDF:
-            resource.raw_content = resp.content
-            resource.text = None
-            return resource
-
-        resource.raw_content = resp.content
-        resource.text = None
-        return resource

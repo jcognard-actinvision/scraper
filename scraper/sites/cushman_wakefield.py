@@ -48,21 +48,13 @@ class CushmanWakefieldScraper(SiteScraper):
     # Pipeline d’URLs de listing
     # ------------------------------------------------------------------
     def iter_listing_urls(self) -> Iterable[str]:
-        """
-        On ne renvoie qu’une pseudo-URL "API" : le run.py va faire un GET dessus.
-        On gère la pagination à l’intérieur d'extract_resources_from_listing().
-        """
+        # On ne renvoie qu’une pseudo-URL "API" : run.py fera un GET dessus,
+        # et on gère la pagination à l’intérieur.
         yield self.SEARCH_URL
 
     def extract_resources_from_listing(
         self, html_text: str, url: str
     ) -> list[Resource]:
-        """
-        Ici, `html_text` est en réalité une string vide (GET sur l’URL API),
-        on ignore ce paramètre et on appelle l’API Coveo nous-mêmes via POST.
-
-        On pagine jusqu’à self.max_pages ou jusqu’à épuisement des résultats.
-        """
         all_resources: list[Resource] = []
 
         page_size = 12
@@ -149,33 +141,35 @@ class CushmanWakefieldScraper(SiteScraper):
     def extract_content(self, resource: Resource) -> Resource:
         resource.meta = resource.meta or {}
 
-        # Cas PDF : on télécharge juste le binaire, sans extraction de texte
+        # Cas PDF : on télécharge juste le binaire, sans toucher à resource.url
         if resource.type == ResourceType.PDF:
-            primary_url = self._prefer_public_cw_url(resource.url)
-            if not primary_url:
+            stable_url = resource.url
+            fetch_url = self._prefer_public_cw_url(stable_url)
+
+            if not fetch_url:
                 resource.meta["fetch_error"] = "no_pdf_url"
                 resource.text = None
                 return resource
 
-            logger.info("C&W: fetching PDF %s", primary_url)
+            logger.info("C&W: fetching PDF %s", fetch_url)
             try:
-                resp = self.session.get(primary_url, timeout=30)
+                resp = self.session.get(fetch_url, timeout=30)
                 resp.raise_for_status()
             except Exception as exc:
-                logger.warning("C&W: failed to fetch PDF %s: %s", primary_url, exc)
+                logger.warning("C&W: failed to fetch PDF %s: %s", fetch_url, exc)
                 resource.meta["fetch_error"] = str(exc)
                 resource.text = None
                 return resource
 
-            resource.url = primary_url
             resource.raw_content = resp.content
-            resource.meta["fetched_url"] = primary_url
+            resource.meta["fetched_url"] = fetch_url
             resource.meta["final_url"] = resp.url
             resource.text = None
             return resource
 
-        # Cas HTML : logique actuelle inchangée
-        primary_url = self._prefer_public_cw_url(resource.url)
+        # Cas HTML : logique actuelle, mais sans modifier resource.url
+        stable_url = resource.url
+        primary_url = self._prefer_public_cw_url(stable_url)
         fallback_url = self._prefer_public_cw_url(resource.meta.get("printable_uri"))
 
         candidate_urls: list[str] = []
@@ -205,7 +199,6 @@ class CushmanWakefieldScraper(SiteScraper):
             resource.text = None
             return resource
 
-        resource.url = fetched_url or resource.url
         resource.raw_content = resp.content
         resource.meta["fetched_url"] = fetched_url
         resource.meta["final_url"] = resp.url
@@ -425,8 +418,8 @@ class CushmanWakefieldScraper(SiteScraper):
             filetype,
         )
 
-        # Si Coveo indique un PDF, on crée directement une ressource PDF
         if filetype == "pdf" or url.lower().endswith(".pdf"):
+            meta["pdf_url"] = url
             return Resource(
                 url=url,
                 type=ResourceType.PDF,
@@ -435,7 +428,6 @@ class CushmanWakefieldScraper(SiteScraper):
                 meta=meta,
             )
 
-        # Sinon, ressource HTML comme avant
         return Resource(
             url=url,
             type=ResourceType.HTML,
@@ -448,10 +440,6 @@ class CushmanWakefieldScraper(SiteScraper):
     # Helpers utilitaires
     # ------------------------------------------------------------------
     def _should_skip_path(self, path: str) -> bool:
-        """
-        Filtre quelques URLs non pertinentes (people, properties).
-        À adapter selon ton besoin.
-        """
         skip_prefixes = (
             "/en/united-states/people/",
             "/en/people/",
@@ -463,10 +451,6 @@ class CushmanWakefieldScraper(SiteScraper):
         return path.startswith(skip_prefixes)
 
     def _prefer_public_cw_url(self, url: str | None) -> str | None:
-        """
-        - nettoie la string,
-        - remplace sitecore-www.cushmanwakefield.com par www.cushmanwakefield.com.
-        """
         if not url:
             return None
 

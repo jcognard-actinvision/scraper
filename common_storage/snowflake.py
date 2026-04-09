@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from datetime import UTC, datetime
+from urllib.parse import urlsplit, urlunsplit
 
 import snowflake.connector
 from cryptography.hazmat.backends import default_backend
@@ -12,6 +13,24 @@ from cryptography.hazmat.primitives import serialization
 from common_runtime.settings import Settings
 from common_storage.base import StorageBackend
 from common_storage.models import StoredDocument, StoredError
+
+
+def canonicalize_url(url: str | None) -> str | None:
+    if not url:
+        return url
+
+    parts = urlsplit(url.strip())
+    scheme = (parts.scheme or "https").lower()
+    netloc = (parts.netloc or "").lower()
+
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    path = parts.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 
 class SnowflakeStorage(StorageBackend):
@@ -72,15 +91,17 @@ class SnowflakeStorage(StorageBackend):
             errors_table=Settings.errors_table,
         )
 
-    # ---------- helpers ----------
-
     def _utc_now(self):
         return datetime.now(UTC).replace(tzinfo=None)
 
-    def _execute(self, sql: str, params: tuple | None = None):
+    def _execute(self, sql: str, params: tuple | None = None) -> None:
         with self.conn.cursor() as cur:
             cur.execute(sql, params or ())
-            return cur
+
+    def _fetchone(self, sql: str, params: tuple | None = None):
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params or ())
+            return cur.fetchone()
 
     def _put_content(self, stage_path: str, content: bytes):
         stage_dir, filename = stage_path.rsplit("/", 1)
@@ -131,17 +152,17 @@ class SnowflakeStorage(StorageBackend):
             "attachment_id",
             "filename",
             "subject",
-            "date",
             "from",
             "label_id",
             "body_text",
             "body_html",
+            "canonical_document_url",
+            "canonical_source_url",
+            "original_document_url",
         }
 
         cleaned = {k: v for k, v in metadata.items() if k in allowed}
         return json.dumps(cleaned, ensure_ascii=True)
-
-    # ---------- implémentations StorageBackend ----------
 
     def start_run(self, source_name: str, metadata: dict | None = None) -> str:
         run_id = str(uuid.uuid4())
@@ -176,25 +197,31 @@ class SnowflakeStorage(StorageBackend):
         external_id: str | None = None,
         document_url: str | None = None,
     ) -> bool:
-        clauses = ["SOURCE_NAME = %s"]
-        params = [source_name]
+        canonical_document_url = canonicalize_url(document_url)
 
-        if document_url:
-            clauses.append("DOCUMENT_URL = %s")
-            params.append(document_url)
-        else:
+        if not canonical_document_url:
             return False
 
         sql = f"""
         SELECT 1
         FROM {self.scraped_documents_table}
-        WHERE {" AND ".join(clauses)}
+        WHERE SOURCE_NAME = %s
+          AND DOCUMENT_URL = %s
         LIMIT 1
         """
-        cur = self._execute(sql, tuple(params))
-        return cur.fetchone() is not None
+
+        row = self._fetchone(sql, (source_name, canonical_document_url))
+        return row is not None
 
     def save_document(self, doc: StoredDocument) -> None:
+        doc.document_url = canonicalize_url(doc.document_url)
+        doc.source_url = canonicalize_url(doc.source_url)
+        if doc.external_id:
+            doc.external_id = canonicalize_url(doc.external_id)
+
+        if self.exists(source_name=doc.source_name, document_url=doc.document_url):
+            return
+
         stage_path = self._build_stage_path(doc)
         sha256 = None
 

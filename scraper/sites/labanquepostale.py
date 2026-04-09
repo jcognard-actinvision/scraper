@@ -84,7 +84,8 @@ class LaBanquePostaleScraper(SiteScraper):
             html = resp.content.decode(resp.encoding or "utf-8", errors="ignore")
             soup = BeautifulSoup(html, "html.parser")
 
-            resource.meta["article_url"] = resource.url
+            article_url = resource.url
+            resource.meta["article_url"] = article_url
 
             h1 = soup.find("h1")
             if h1:
@@ -98,13 +99,12 @@ class LaBanquePostaleScraper(SiteScraper):
             if pdf_link and pdf_link.get("href"):
                 pdf_url = urljoin(self.base_url, pdf_link["href"])
                 resource.meta["pdf_url"] = pdf_url
-                resource.meta["source_html"] = resource.url
-                logger.info("Resource: %s | PDF: %s", resource.url, pdf_url)
+                resource.meta["source_html"] = article_url
+                logger.info("Resource: %s | PDF: %s", article_url, pdf_url)
 
                 pdf_resp = self.safe_get(pdf_url)
                 if pdf_resp is not None:
                     resource.type = ResourceType.PDF
-                    resource.url = pdf_url
                     resource.raw_content = pdf_resp.content
                     resource.text = None
                     return resource

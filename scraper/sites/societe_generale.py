@@ -80,7 +80,9 @@ class SocieteGeneraleScraper(SiteScraper):
     def extract_content(self, resource: Resource) -> Resource:
         resource.meta = resource.meta or {}
 
-        resp = self.session.get(resource.url, timeout=30)
+        stable_article_url = resource.url
+
+        resp = self.session.get(stable_article_url, timeout=30)
         resp.raise_for_status()
 
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -92,12 +94,12 @@ class SocieteGeneraleScraper(SiteScraper):
         if title:
             resource.title = title
 
-        resource.meta["source_html"] = resource.url
-        resource.meta["article_url"] = resource.url
+        resource.meta["source_html"] = stable_article_url
+        resource.meta["article_url"] = stable_article_url
 
         extracted = None
         for strategy in DEFAULT_STRATEGIES:
-            if strategy.matches(resource.url, soup):
+            if strategy.matches(stable_article_url, soup):
                 resource.meta["strategy"] = strategy.__class__.__name__
                 extracted = strategy.extract(resource, soup)
                 break
@@ -110,12 +112,11 @@ class SocieteGeneraleScraper(SiteScraper):
 
         resource = extracted
         resource.meta = resource.meta or {}
-        resource.meta.setdefault(
-            "source_html", resource.meta.get("article_url", resource.url)
-        )
-        resource.meta.setdefault(
-            "article_url", resource.meta.get("source_html", resource.url)
-        )
+
+        # On réimpose l'URL stable issue du listing
+        resource.url = stable_article_url
+        resource.meta["article_url"] = stable_article_url
+        resource.meta["source_html"] = stable_article_url
 
         pdf_url = resource.meta.get("pdf_url")
 
@@ -126,7 +127,6 @@ class SocieteGeneraleScraper(SiteScraper):
             pdf_resp = self.safe_get(pdf_url)
             if pdf_resp is not None:
                 resource.type = ResourceType.PDF
-                resource.url = pdf_url
                 resource.raw_content = pdf_resp.content
                 resource.text = None
                 return resource
