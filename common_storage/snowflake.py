@@ -321,3 +321,52 @@ class SnowflakeStorage(StorageBackend):
                 run_id,
             ),
         )
+
+    def has_processed_message(self, source_name: str, external_id: str) -> bool:
+        sql = """
+            SELECT 1
+            FROM SCRAPER_DB.RAW.PROCESSED_MESSAGES
+            WHERE SOURCE_NAME = %(source_name)s
+            AND EXTERNAL_ID = %(external_id)s
+            LIMIT 1
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                sql,
+                {
+                    "source_name": source_name,
+                    "external_id": external_id,
+                },
+            )
+            return cur.fetchone() is not None
+
+    def mark_message_processed(
+        self,
+        source_name: str,
+        external_id: str,
+        metadata: dict | None = None,
+    ) -> None:
+        if self.has_processed_message(source_name, external_id):
+            return
+
+        sql = """
+            INSERT INTO SCRAPER_DB.RAW.PROCESSED_MESSAGES (
+                SOURCE_NAME,
+                EXTERNAL_ID,
+                EXTRA
+            )
+            SELECT
+                %(source_name)s,
+                %(external_id)s,
+                PARSE_JSON(%(extra)s)
+        """
+
+        with self.conn.cursor() as cur:
+            cur.execute(
+                sql,
+                {
+                    "source_name": source_name,
+                    "external_id": external_id,
+                    "extra": json.dumps(metadata or {}, ensure_ascii=False),
+                },
+            )

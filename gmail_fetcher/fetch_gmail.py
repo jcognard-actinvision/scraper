@@ -201,7 +201,17 @@ def main():
     try:
         for msg_meta in iter_messages_by_label(service, user_id, label_id):
             msg_id = msg_meta["id"]
+
             try:
+                if hasattr(
+                    storage, "has_processed_message"
+                ) and storage.has_processed_message(
+                    source_name=source_name,
+                    external_id=msg_id,
+                ):
+                    skipped += 1
+                    continue
+
                 full = get_message_full(service, user_id, msg_id)
 
                 headers = {
@@ -240,22 +250,11 @@ def main():
                 results.append(result)
                 processed += 1
 
-                # if hasattr(storage, "exists") and storage.exists(
-                #     source_name=source_name,
-                #     external_id=msg_id,
-                # ):
-                #     skipped += 1
-                # else:
-                #     storage.save_document(email_to_document(source_name, result))
-                #     inserted += 1
-
                 for attachment in pdf_attachments:
-                    att_external_id = f"{msg_id}:{attachment['attachment_id']}"
                     att_doc = {
                         "attachment_id": attachment["attachment_id"],
                         "filename": attachment["filename"],
                         "content": attachment["content"],
-                        # nouvelles métadonnées mail
                         "message_id": msg_id,
                         "subject": subject,
                         "date": date,
@@ -264,12 +263,23 @@ def main():
                         "body_text": body["text"],
                         "body_html": body["html"],
                     }
-                    if hasattr(storage, "exists") and storage.exists(
-                        source_name=source_name, external_id=att_external_id
-                    ):
-                        continue
+
                     storage.save_document(
                         attachment_to_document(source_name, msg_id, att_doc)
+                    )
+                    inserted += 1
+
+                if hasattr(storage, "mark_message_processed"):
+                    storage.mark_message_processed(
+                        source_name=source_name,
+                        external_id=msg_id,
+                        metadata={
+                            "label_id": label_id,
+                            "subject": subject,
+                            "date": date,
+                            "from": frm,
+                            "attachment_count": len(pdf_attachments),
+                        },
                     )
 
             except Exception as e:
