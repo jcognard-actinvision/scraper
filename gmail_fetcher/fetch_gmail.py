@@ -274,19 +274,18 @@ def main():
 
             except Exception as e:
                 errors += 1
-                if hasattr(storage, "log_error"):
-                    storage.log_error(
-                        StoredError(
-                            run_id=run_id or "",
-                            source_name=source_name,
-                            url=f"gmail://message/{msg_id}",
-                            step="gmail_fetcher.main",
-                            error_type=type(e).__name__,
-                            error_message=str(e),
-                            error_stack="",
-                            metadata={"label_id": label_id},
-                        )
+                storage.log_and_notify_error(
+                    StoredError(
+                        run_id=run_id or "",
+                        source_name=source_name,
+                        url=f"gmail://message/{msg_id}",
+                        step="gmail_fetcher.main",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        error_stack="",
+                        metadata={"label_id": label_id},
                     )
+                )
 
     finally:
         if run_id and hasattr(storage, "finish_run"):
