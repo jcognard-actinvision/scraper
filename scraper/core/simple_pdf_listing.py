@@ -70,6 +70,9 @@ class SimplePdfListingScraper(SiteScraper):
                 continue
             seen.add(full_url)
 
+            # we want to get rid of span.text-gray-400 in titles, which are used for PDF info on aspim.fr
+            for span in a.select("span.text-gray-400"):
+                span.decompose()
             title = a.get_text(strip=True) or full_url
 
             resources.append(

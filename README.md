@@ -1,12 +1,13 @@
 # Stonelake – Scraper & Gmail Fetcher
 
-Ce projet regroupe :
+Ce projet regroupe :
 
 - un **module `scraper`** pour extraire des contenus web (HTML, PDF, métadonnées) depuis différentes sources,
 - un **module `gmail_fetcher`** pour extraire le contenu et les pièces jointes PDF d’emails d’un label Gmail donné,
-- une **couche de stockage** factorisée (`common_storage`) permettant d’enregistrer les documents soit en local, soit dans Snowflake.
+- une **couche de stockage** factorisée (`common_storage`) permettant d’enregistrer les documents soit en local, soit dans Snowflake,
+- une **couche HTTP `FastAPI`** permettant d’exposer des endpoints de lancement pour Docker, Cloud Run et Cloud Scheduler.
 
-L’objectif est de produire des sorties homogènes (JSON + PDF) qui pourront ensuite être exploitées ou adaptées (par exemple pour alimenter Snowflake directement).
+L’objectif est de produire des sorties homogènes et de permettre une exécution soit en ligne de commande, soit via des appels HTTP authentifiés dans Google Cloud.
 
 ---
 
@@ -14,9 +15,9 @@ L’objectif est de produire des sorties homogènes (JSON + PDF) qui pourront en
 
 ```text
 .
+├── app.py                    # Entrypoint HTTP FastAPI pour Cloud Run / local
 ├── common_runtime/           # Paramétrage générique (Settings, env, etc.)
 ├── common_storage/           # Abstractions de stockage (local, Snowflake, modèles)
-├── docker/                   # Entrypoint Docker (module docker.entrypoint)
 ├── gmail_fetcher/            # Extraction d’emails et pièces jointes Gmail
 ├── gmail_tokens/             # Credentials / tokens OAuth Gmail (local)
 ├── keys/                     # Clé privée Snowflake (local)
@@ -31,6 +32,27 @@ L’objectif est de produire des sorties homogènes (JSON + PDF) qui pourront en
 
 ---
 
+## Architecture d’exécution
+
+Le projet peut maintenant être utilisé selon deux modes :
+
+- **mode CLI** : pratique en développement local, via `python -m scraper.run` ou `python -m gmail_fetcher.fetch_gmail`,
+- **mode HTTP** : recommandé pour Docker, Cloud Run et Cloud Scheduler, via des endpoints FastAPI appelés en `POST`.
+
+### Endpoints exposés
+
+L’application HTTP expose les endpoints suivants :
+
+- `GET /health` : vérification rapide de disponibilité du service ; utile pour les probes et tests simples.
+- `GET /sites` : retourne la liste des scrapers disponibles.
+- `POST /run/scrapers` : lance un ou plusieurs scrapers web.
+- `POST /run/gmail` : lance le fetch Gmail.
+- `POST /run/all` : lance le scraper web puis le fetch Gmail.
+
+Cette approche est adaptée à Cloud Run, qui attend un service HTTP écoutant sur `0.0.0.0:$PORT` dans le conteneur.
+
+---
+
 ## Prérequis
 
 - Python **3.11+** recommandé.
@@ -38,7 +60,7 @@ L’objectif est de produire des sorties homogènes (JSON + PDF) qui pourront en
 - Accès à la console Google Cloud pour créer des identifiants OAuth Gmail.
 - (Optionnel) Un compte Snowflake si on active le backend Snowflake.
 
-Installation des dépendances en local :
+Installation des dépendances en local :
 
 ```bash
 python -m venv .venv
@@ -54,24 +76,25 @@ pip install -r requirements.txt
 
 ## Configuration par variables d’environnement
 
-La configuration est centralisée via des variables d’environnement lues dans `common_runtime.settings`, `common_storage` et `gmail_fetcher`.  
+La configuration est centralisée via des variables d’environnement lues dans `common_runtime.settings`, `common_storage`, `scraper` et `gmail_fetcher`.
+
 Un fichier `.env.example` est fourni comme modèle.
 
 ### Exemple `.env`
 
 ```env
-# --- Backend de stockage ---
-# "local" (par défaut) ou "snowflake"
-STORAGE_BACKEND=local
+# --- Mode d'exécution ---
+APP_TARGET=scraper
 
-# Répertoire de sortie (local)
+# --- Backend de stockage ---
+STORAGE_BACKEND=local
 OUTPUT_DIR=output
 
 # --- Gmail fetcher ---
 GMAIL_USER_ID=me
 GMAIL_LABEL_ID=Label_123456
-GMAIL_CREDENTIALS_PATH=credentials.json
-GMAIL_TOKEN_PATH=token.json
+GMAIL_CREDENTIALS_PATH=gmail_tokens/credentials.json
+GMAIL_TOKEN_PATH=gmail_tokens/token.json
 GMAIL_OUTPUT_DIR=gmail_output
 
 # --- Snowflake ---
@@ -83,6 +106,11 @@ SNOWFLAKE_DATABASE=STONELAKE_DB
 SNOWFLAKE_SCHEMA=RAW
 SNOWFLAKE_PRIVATE_KEY_PATH=keys/rsa_key.p8
 SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=*****
+
+SNOWFLAKE_STAGE_ROOT=@SCRAPER_STAGE
+SCRAPED_DOCUMENTS_TABLE=SCRAPED_DOCUMENTS
+SCRAPER_RUNS_TABLE=SCRAPER_RUNS
+SCRAPER_ERRORS_TABLE=SCRAPER_ERRORS
 
 # --- SMTP notifications (optionnel) ---
 SMTP_ENABLED=false
@@ -103,18 +131,19 @@ En local, Docker et Cloud Run, la même logique s’applique : la configuration 
 
 ## Module `scraper`
 
-Le module `scraper` permet d’extraire des pages web et des documents (PDF) à partir de différentes sources configurées, puis de produire un JSON et des fichiers locaux (PDF, HTML, etc.).
+Le module `scraper` permet d’extraire des pages web et des documents (PDF) à partir de différentes sources configurées, puis de produire des documents normalisés exploitables en stockage local ou Snowflake.
 
 ### Principales fonctionnalités
 
-- Récupération de pages d’insights / articles (ex. Cushman & Wakefield, banques, notaires, etc.).
-- Extraction de métadonnées (titre, date, tags, etc.).
+- Récupération de pages d’insights / articles.
+- Extraction de métadonnées.
 - Détection et téléchargement des pièces jointes PDF.
-- Normalisation de la sortie pour qu’elle soit facilement exploitable (fichiers + JSON).
+- Normalisation de la sortie.
+- Gestion d’un mode incrémental basé sur l’existence des documents déjà stockés.
 
-### Sites pris en charge (exemples)
+### Sites pris en charge
 
-Les implémentations spécifiques se trouvent dans `scraper/sites/` :
+Les implémentations spécifiques se trouvent dans `scraper/sites/` :
 
 ```text
 scraper/sites/
@@ -138,22 +167,55 @@ scraper/sites/
 └── wargny_katz.py
 ```
 
-Chaque module de site s’appuie sur les abstractions de `scraper.core` (`base_site`, `http`, `parsers`, `content_strategies`, etc.).
-
-### Exécution en local
+### Exécution en local (CLI)
 
 ```bash
 # Exécuter tous les scrapers configurés
 python -m scraper.run
 
-# Exemple : n’exécuter qu’un site avec une pagination limitée
+# Exécuter un site précis
+python -m scraper.run --site aspim
+
+# Plusieurs sites
+python -m scraper.run --site aspim --site fbf
+
+# Limiter la pagination
 python -m scraper.run --site aspim --max-pages 1
+
+# Lister les sites disponibles
+python -m scraper.run --list-sites
 ```
 
-La sortie par défaut (en mode stockage local) se fait dans un dossier `output/` ou `output_docker/` avec :
+### Exécution via HTTP
 
-- les pages HTML et/ou PDF téléchargées,
-- un ou plusieurs fichiers JSON résumant les documents et leurs métadonnées.
+L’endpoint `POST /run/scrapers` supporte l’équivalent des arguments CLI via query parameters FastAPI.
+
+Exemples :
+
+```http
+POST /run/scrapers
+```
+
+```http
+POST /run/scrapers?site=aspim
+```
+
+```http
+POST /run/scrapers?site=aspim&site=fbf&max_pages=1
+```
+
+```http
+POST /run/scrapers?list_sites=true
+```
+
+Paramètres supportés :
+
+- `site` : paramètre répétable, équivalent à `--site`,
+- `max_pages` : entier optionnel, équivalent à `--max-pages`,
+- `output_dir` : chaîne optionnelle, équivalent à `--output-dir`,
+- `list_sites` : booléen optionnel, équivalent à `--list-sites`.
+
+La réponse retourne un JSON contenant un statut global et un détail par scraper exécuté.
 
 ---
 
@@ -174,56 +236,78 @@ gmail_fetcher/
 
 ### Configuration
 
-Le module `gmail_fetcher` lit sa configuration **via les variables d’environnement**, par exemple :
+Le module `gmail_fetcher` lit sa configuration via les variables d’environnement :
 
 ```env
 GMAIL_USER_ID=me
 GMAIL_LABEL_ID=Label_123456
-GMAIL_CREDENTIALS_PATH=credentials.json
-GMAIL_TOKEN_PATH=token.json
+GMAIL_CREDENTIALS_PATH=gmail_tokens/credentials.json
+GMAIL_TOKEN_PATH=gmail_tokens/token.json
 GMAIL_OUTPUT_DIR=gmail_output
 ```
 
-- `GMAIL_CREDENTIALS_PATH` : chemin vers le client OAuth Gmail (`credentials.json`).
-- `GMAIL_TOKEN_PATH` : chemin vers le token utilisateur (`token.json`), généré après la première authentification.
-- `GMAIL_OUTPUT_DIR` : dossier de sortie pour `gmail_label_dump.json` et les PDF.
+- `GMAIL_CREDENTIALS_PATH` : chemin vers le client OAuth Gmail.
+- `GMAIL_TOKEN_PATH` : chemin vers le token utilisateur généré après authentification.
+- `GMAIL_OUTPUT_DIR` : dossier de sortie local si `LocalStorage` est utilisé.
+
+### Exécution CLI
+
+```bash
+python -m gmail_fetcher.fetch_gmail
+```
+
+### Exécution HTTP
+
+```http
+POST /run/gmail
+```
+
+Le endpoint lance le fetch Gmail et retourne un JSON de synthèse, par exemple :
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "processed": 12,
+    "inserted": 5,
+    "skipped": 7,
+    "errors": 0
+  }
+}
+```
 
 ---
 
 ## Création du client OAuth Gmail
 
 1. Aller sur <https://console.cloud.google.com>.
-2. Créer un projet (ou en utiliser un existant).
-3. Activer l’API Gmail :
-   - Menu “API & Services” → “Bibliothèque”.
-   - Chercher **“Gmail API”** → “Activer”.
-4. Configurer l’écran de consentement OAuth :
-   - “API & Services” → “Écran de consentement OAuth”.
-   - Type d’utilisateur : **Externe** en général.
-   - Remplir les champs obligatoires (nom de l’app, e‑mail, etc.).
-   - Scope minimum recommandé :
-     - `https://www.googleapis.com/auth/gmail.readonly`
-   - Passer l’app en **“En production”** une fois prête.
-5. Créer un ID client OAuth 2.0 :
-   - “Identifiants” → “Créer des identifiants” → “ID client OAuth”.
-   - Type d’application : **Application de bureau**.
-   - Télécharger le JSON et le placer sous `gmail_tokens/credentials.json` (ou adapter `GMAIL_CREDENTIALS_PATH`).
+2. Créer un projet ou utiliser un projet existant.
+3. Activer l’API Gmail.
+4. Configurer l’écran de consentement OAuth.
+5. Créer un ID client OAuth 2.0 de type **Application de bureau**.
+6. Télécharger le JSON et le placer sous `gmail_tokens/credentials.json`.
+
+Le scope minimum recommandé est :
+
+- `https://www.googleapis.com/auth/gmail.readonly`
 
 ---
 
-## Authentification & gestion du token Gmail
+## Authentification et gestion du token Gmail
 
-Lors de la première exécution d’un script `gmail_fetcher` :
+Lors de la première exécution d’un script `gmail_fetcher` en local :
 
-- une fenêtre de navigateur s’ouvre pour autoriser l’application à accéder à Gmail en lecture seule,
-- les informations d’authentification sont stockées dans `gmail_tokens/token.json` (access_token + refresh_token).
+- une fenêtre de navigateur s’ouvre pour autoriser l’application,
+- les informations d’authentification sont stockées dans `gmail_tokens/token.json`.
 
-Le code gère automatiquement :
+Le code gère ensuite automatiquement :
 
-- le rafraîchissement de l’`access_token` à l’expiration,
+- le rafraîchissement de l’`access_token`,
 - la réauthentification si le `refresh_token` est révoqué ou invalide.
 
-Pour réinitialiser proprement le token, il suffit de supprimer `token.json` et de relancer le script (une nouvelle fenêtre d’auth s’ouvrira).
+Pour réinitialiser le token, supprimer `token.json` puis relancer la procédure locale.
+
+> En environnement Cloud Run, le token et les credentials sont généralement injectés via Secret Manager et montés comme fichiers dans le conteneur, plutôt que stockés localement.
 
 ---
 
@@ -233,250 +317,163 @@ Pour réinitialiser proprement le token, il suffit de supprimer `token.json` et 
 python -m gmail_fetcher.list_labels
 ```
 
-Ce script affiche la liste des labels disponibles :
-
-```text
-INBOX                          INBOX                                             (system)
-Label_123456                   Mon label SG                                      (user)
-Label_ABCDEF                   Autre label                                       (user)
-...
-```
-
-Recopier ensuite l’ID souhaité dans la variable `GMAIL_LABEL_ID` du fichier `.env`.
-
----
-
-## Extraire les emails et PDF d’un label
-
-```bash
-python -m gmail_fetcher.fetch_gmail
-```
-
-Le script :
-
-- lit la configuration via les variables d’environnement,
-- se connecte à l’API Gmail,
-- parcourt les emails du label,
-- extrait headers (subject, date, from), corps text + HTML,
-- télécharge les pièces jointes PDF,
-- écrit un `gmail_label_dump.json` dans `GMAIL_OUTPUT_DIR` plus les PDF.
-
-Exemple de JSON (simplifié) :
-
-```json
-[
-  {
-    "id": "17c8f4b123456789",
-    "subject": "Rapport trimestriel",
-    "date": "Wed, 27 Mar 2026 10:15:30 +0100",
-    "from": "Banque <contact@banque.fr>",
-    "label_id": "Label_123456",
-    "body_text": "Contenu texte...",
-    "body_html": "<p>Contenu HTML...</p>",
-    "pdf_attachments": [
-      "17c8f4b123456789_rapport_q1.pdf"
-    ]
-  }
-]
-```
-
-Les documents PDF sont en parallèle stockés en tant que `StoredDocument` via `common_storage` (local ou Snowflake selon la configuration).
+Ce script affiche la liste des labels disponibles afin de renseigner `GMAIL_LABEL_ID`.
 
 ---
 
 ## Stockage : local vs Snowflake
 
-La couche `common_storage` permet de changer de backend sans modifier les modules de scraping / Gmail :
+La couche `common_storage` permet de changer de backend sans modifier les modules métier :
 
-- `LocalStorage` : écrit les fichiers et JSON sur disque (`output/`, `output_docker/`, etc.).
-- `SnowflakeStorage` : insère les documents dans une table Snowflake (ex. `SCRAPED_DOCUMENTS`) en stockant :
-  - le contenu binaire (PDF),
-  - le texte extrait,
-  - les métadonnées dans une colonne semi-structurée (type `VARIANT`).
+- `LocalStorage` : écrit les fichiers et JSON sur disque.
+- `SnowflakeStorage` : insère les documents dans Snowflake avec contenu, texte et métadonnées.
 
-Le backend est choisi via `STORAGE_BACKEND` :
+Le backend est choisi via `STORAGE_BACKEND` :
 
 ```env
-STORAGE_BACKEND=local       # pour tests/dev
+STORAGE_BACKEND=local
 # ou
-STORAGE_BACKEND=snowflake   # en production
+STORAGE_BACKEND=snowflake
 ```
 
-La configuration Snowflake (compte, user, rôle, warehouse, DB, schéma, clé privée) est portée par les variables `SNOWFLAKE_*` (voir plus haut).
+La configuration Snowflake repose sur les variables `SNOWFLAKE_*`.
 
 ---
 
 ## Notifications d’erreur par email (SMTP)
 
-Le projet peut envoyer des notifications email lorsqu’une erreur est journalisée via `log_error`, à condition qu’une configuration SMTP valide soit définie dans les variables d’environnement.
+Le projet peut envoyer des notifications email lorsqu’une erreur est journalisée, à condition qu’une configuration SMTP valide soit définie dans les variables d’environnement.
 
-Cette fonctionnalité est **optionnelle** :
+Cette fonctionnalité est optionnelle :
+
 - si `SMTP_ENABLED=false`, aucun email n’est envoyé ;
-- si les paramètres SMTP requis sont absents, le projet continue de fonctionner sans notification ;
+- si les paramètres SMTP requis sont absents, le projet continue de fonctionner ;
 - si l’envoi SMTP échoue, cela ne doit pas interrompre le traitement principal.
 
 ### Variables SMTP
 
 | Variable | Description |
 |----------|-------------|
-| `SMTP_ENABLED` | Active ou désactive les notifications email (`true` / `false`). |
+| `SMTP_ENABLED` | Active ou désactive les notifications email. |
 | `SMTP_HOST` | Hôte du serveur SMTP. |
-| `SMTP_PORT` | Port SMTP, par exemple `587` pour STARTTLS ou `465` pour SSL implicite. |
-| `SMTP_USERNAME` | Nom d’utilisateur SMTP, si requis par le fournisseur. |
-| `SMTP_PASSWORD` | Mot de passe SMTP, si requis. |
-| `SMTP_USE_TLS` | Active `STARTTLS` après connexion SMTP. Généralement utilisé avec le port `587`. |
-| `SMTP_USE_SSL` | Utilise `SMTP_SSL` dès l’ouverture de la connexion. Généralement utilisé avec le port `465`. |
-| `SMTP_FROM` | Adresse email expéditrice. |
+| `SMTP_PORT` | Port SMTP, par exemple `587` ou `465`. |
+| `SMTP_USERNAME` | Nom d’utilisateur SMTP. |
+| `SMTP_PASSWORD` | Mot de passe SMTP. |
+| `SMTP_USE_TLS` | Active STARTTLS. |
+| `SMTP_USE_SSL` | Utilise SMTP SSL direct. |
+| `SMTP_FROM` | Adresse expéditrice. |
 | `SMTP_TO` | Liste des destinataires séparés par des virgules. |
-| `SMTP_SUBJECT_PREFIX` | Préfixe ajouté à l’objet des emails d’alerte. |
-
-### Exemple Office 365
-
-```env
-SMTP_ENABLED=true
-SMTP_HOST=smtp.office365.com
-SMTP_PORT=587
-SMTP_USERNAME=alertes@mondomaine.fr
-SMTP_PASSWORD=**
-SMTP_USE_TLS=true
-SMTP_USE_SSL=false
-SMTP_FROM=alertes@mondomaine.fr
-SMTP_TO=jerome@mondomaine.fr,ops@mondomaine.fr
-SMTP_SUBJECT_PREFIX=[Stonelake PROD]
-```
-
-### Exemple SMTP SSL direct
-
-```env
-SMTP_ENABLED=true
-SMTP_HOST=smtp.example.com
-SMTP_PORT=465
-SMTP_USERNAME=alertes@example.com
-SMTP_PASSWORD=**
-SMTP_USE_TLS=false
-SMTP_USE_SSL=true
-SMTP_FROM=alertes@example.com
-SMTP_TO=ops@example.com
-SMTP_SUBJECT_PREFIX=[Stonelake]
-```
+| `SMTP_SUBJECT_PREFIX` | Préfixe de l’objet des emails d’alerte. |
 
 ### Bonnes pratiques
 
-- Utiliser **soit** `SMTP_USE_TLS=true`, **soit** `SMTP_USE_SSL=true`, mais pas les deux en même temps.
-- Ne jamais committer `SMTP_PASSWORD` dans le dépôt.
-- En environnement conteneurisé ou cloud, injecter `SMTP_PASSWORD` via un secret ou une variable sécurisée.
-- Vérifier que l’adresse `SMTP_FROM` est autorisée par le serveur SMTP utilisé.
+- Utiliser soit `SMTP_USE_TLS=true`, soit `SMTP_USE_SSL=true`, mais pas les deux.
+- Ne jamais committer `SMTP_PASSWORD`.
+- En environnement cloud, injecter les secrets SMTP via Secret Manager.
+- Vérifier que l’adresse `SMTP_FROM` est autorisée par le serveur SMTP.
+
+---
+
+## Utilisation locale en mode HTTP
+
+Une fois `app.py` ajouté, tu peux démarrer le service localement avec Uvicorn :
+
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8080
+```
+
+Puis tester :
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/sites
+curl -X POST "http://localhost:8080/run/scrapers?site=aspim&max_pages=1"
+curl -X POST "http://localhost:8080/run/gmail"
+curl -X POST "http://localhost:8080/run/all?site=aspim&max_pages=1"
+```
+
+Sous Windows PowerShell :
+
+```powershell
+Invoke-RestMethod http://localhost:8080/health
+Invoke-RestMethod http://localhost:8080/sites
+Invoke-RestMethod -Method Post "http://localhost:8080/run/scrapers?site=aspim&max_pages=1"
+Invoke-RestMethod -Method Post "http://localhost:8080/run/gmail"
+Invoke-RestMethod -Method Post "http://localhost:8080/run/all?site=aspim&max_pages=1"
+```
 
 ---
 
 ## Utilisation avec Docker
 
-Un `Dockerfile` est fourni pour exécuter le projet dans un conteneur.  
-L’image embarque le code et les dépendances, puis exécute par défaut `python -m docker.entrypoint`, mais on peut surcharger la commande au runtime.
+Le conteneur exécute maintenant l’application HTTP FastAPI au lieu de lancer directement un module Python ponctuel. Cette approche est adaptée à Cloud Run, qui attend un service HTTP écoutant sur le port fourni par la variable `PORT`.
 
 ### Construction de l’image
-
-Depuis la racine du projet :
 
 ```bash
 docker build -t stonelake-scraper:local .
 ```
 
-### Principe d’exécution
-
-Les commandes `docker run` ci-dessous :
-
-- chargent la configuration via `--env-file .env` ;
-- montent les répertoires utiles (`output_docker`, `gmail_tokens`, `keys`) ;
-- **surchargent la commande par défaut** pour lancer explicitement le module souhaité, par exemple `python -m scraper.run ...` ou `python -m gmail_fetcher.fetch_gmail`.
-
-### Exécuter un scraper précis
+### Lancer le service HTTP localement
 
 Linux / macOS :
 
 ```bash
 docker run --rm -it \
   --env-file .env \
-  -v "$(pwd)/output_docker:/app/output_docker" \
-  stonelake-scraper:local \
-  python -m scraper.run --site aspim --max-pages 1
-```
-
-Windows PowerShell :
-
-```powershell
-docker run --rm -it `
-  --env-file .env `
-  -v "$PWD/output_docker:/app/output_docker" `
-  stonelake-scraper:local `
-  python -m scraper.run --site aspim --max-pages 1
-```
-
-### Exécuter le fetch Gmail
-
-Linux / macOS :
-
-```bash
-docker run --rm -it \
-  --env-file .env \
+  -p 8080:8080 \
   -v "$(pwd)/gmail_tokens:/app/gmail_tokens" \
-  -v "$(pwd)/output_docker:/app/output_docker" \
-  stonelake-scraper:local \
-  python -m gmail_fetcher.fetch_gmail
-```
-
-Windows PowerShell :
-
-```powershell
-docker run --rm -it `
-  --env-file .env `
-  -v "$PWD/gmail_tokens:/app/gmail_tokens" `
-  -v "$PWD/output_docker:/app/output_docker" `
-  stonelake-scraper:local `
-  python -m gmail_fetcher.fetch_gmail
-```
-
-### Exécution avec Snowflake
-
-Si `STORAGE_BACKEND=snowflake` est défini dans `.env`, il faut aussi monter le répertoire contenant la clé privée :
-
-```bash
-docker run --rm -it \
-  --env-file .env \
   -v "$(pwd)/keys:/app/keys" \
-  -v "$(pwd)/gmail_tokens:/app/gmail_tokens" \
   -v "$(pwd)/output_docker:/app/output_docker" \
-  stonelake-scraper:local \
-  python -m gmail_fetcher.fetch_gmail
+  stonelake-scraper:local
 ```
 
-Exemple de configuration `.env` associée :
+Windows PowerShell :
 
-```env
-STORAGE_BACKEND=snowflake
-SNOWFLAKE_ACCOUNT=xxxxxx.eu-central-1
-SNOWFLAKE_USER=STONELAKE_SVC
-SNOWFLAKE_ROLE=STONELAKE_ROLE
-SNOWFLAKE_WAREHOUSE=STONELAKE_WH
-SNOWFLAKE_DATABASE=STONELAKE_DB
-SNOWFLAKE_SCHEMA=RAW
-SNOWFLAKE_PRIVATE_KEY_PATH=keys/rsa_key.p8
-SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=*****
+```powershell
+docker run --rm -it `
+  --env-file .env `
+  -p 8080:8080 `
+  -v "$PWD/gmail_tokens:/app/gmail_tokens" `
+  -v "$PWD/keys:/app/keys" `
+  -v "$PWD/output_docker:/app/output_docker" `
+  stonelake-scraper:local
 ```
 
-### Répertoires montés recommandés
+Ensuite, appelle les endpoints HTTP depuis ta machine hôte.
 
-| Répertoire local  | Montage conteneur     | Utilité                                      |
-|-------------------|-----------------------|----------------------------------------------|
-| `./output_docker` | `/app/output_docker`  | Récupérer les sorties générées.             |
-| `./gmail_tokens`  | `/app/gmail_tokens`   | Fournir `credentials.json` & `token.json`.  |
-| `./keys`          | `/app/keys`           | Fournir la clé privée Snowflake.            |
+### Dockerfile attendu
+
+Le `Dockerfile` doit lancer Uvicorn, par exemple :
+
+```dockerfile
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+```
+
+Cloud Run fournit `PORT` automatiquement, et en local la valeur par défaut `8080` permet de tester le service facilement.
+
+---
+
+## Déploiement Cloud Run
+
+L’application est conçue pour être déployée sur Cloud Run derrière un service HTTP authentifié.
+
+Principes recommandés :
+
+- service non public avec `--no-allow-unauthenticated`,
+- secrets injectés depuis Secret Manager,
+- compte de service dédié pour le runtime,
+- appels planifiés via Cloud Scheduler en OIDC.
+
+Exemple d’endpoints ciblables par Scheduler :
+
+- `POST /run/gmail`
+- `POST /run/scrapers?site=aspim&max_pages=1`
+- `POST /run/all`
 
 ---
 
 ## Lancer rapidement l’environnement de développement
-
-Rappel :
 
 ```bash
 python -m venv .venv
@@ -490,29 +487,33 @@ pip install -r requirements.txt
 
 Puis, au choix :
 
+### Mode CLI
+
 ```bash
-# Scraper web
 python -m scraper.run --site aspim --max-pages 1
-
-# Lister les labels Gmail
 python -m gmail_fetcher.list_labels
-
-# Extraire les emails + PDF d'un label
 python -m gmail_fetcher.fetch_gmail
 ```
 
-Pour l’exécution en conteneur :
+### Mode HTTP
 
 ```bash
-docker build -t stonelake-scraper:local .
+uvicorn app:app --host 0.0.0.0 --port 8080
 ```
 
-puis, par exemple :
+Puis :
 
 ```bash
-docker run --rm -it \
-  --env-file .env \
-  -v "$(pwd)/output_docker:/app/output_docker" \
-  stonelake-scraper:local \
-  python -m scraper.run --site aspim --max-pages 1
+curl http://localhost:8080/health
+curl -X POST "http://localhost:8080/run/scrapers?site=aspim&max_pages=1"
+curl -X POST "http://localhost:8080/run/gmail"
 ```
+
+---
+
+## Notes de conception
+
+- Le mode CLI reste utile pour le développement et le debug local.
+- Le mode HTTP est la cible privilégiée pour Docker, Cloud Run et Cloud Scheduler.
+- Les fonctions métier doivent rester appelables depuis Python sans dépendre directement d’`argparse`, afin d’être réutilisées à la fois par la CLI et par FastAPI.
+- Pour Cloud Run, il est recommandé de conserver `concurrency=1` si l’on veut éviter des exécutions concurrentes sur les mêmes sources batch.

@@ -298,19 +298,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def run_scraper_job(
+    sites: list[str] | None = None,
+    output_dir: str = "output",
+    max_pages: int | None = None,
+    list_sites: bool = False,
+):
+    if list_sites:
+        return {"available_sites": list(SCRAPER_REGISTRY.keys())}
 
-    if args.list_sites:
-        print("Available sites:")
-        for name in SCRAPER_REGISTRY.keys():
-            print(f"- {name}")
-        return
-
-    scrapers = build_scrapers(args.sites, max_pages=args.max_pages)
-    storage = build_storage_backend(output_dir=args.output_dir)
+    scrapers = build_scrapers(sites, max_pages=max_pages)
+    storage = build_storage_backend(output_dir=output_dir)
 
     all_summaries = {}
+    global_processed = 0
+    global_inserted = 0
+    global_skipped = 0
+    global_errors = 0
 
     for scraper in scrapers:
         scraper_name = scraper.__class__.__name__
@@ -368,7 +372,7 @@ def main():
                             "listing_url": canonicalize_url(listing_url),
                             "original_listing_url": listing_url,
                             "scraper": scraper_name,
-                            "max_pages": args.max_pages,
+                            "max_pages": max_pages,
                         },
                     )
                     log_and_notify_error(storage, err)
@@ -393,31 +397,14 @@ def main():
                     already_exists = False
 
                     try:
-                        logger.info(
-                            "[%s] exists check | source_name=%s | original_url=%s | canonical_url=%s",
-                            scraper_name,
-                            source_name,
-                            original_doc_url,
-                            doc_url,
-                        )
-
                         if hasattr(storage, "exists"):
                             already_exists = storage.exists(
                                 source_name=source_name,
                                 document_url=doc_url,
                             )
-
-                        logger.info(
-                            "[%s] exists result | canonical_url=%s | already_exists=%s",
-                            scraper_name,
-                            doc_url,
-                            already_exists,
-                        )
                     except Exception as e:
                         logger.exception(
-                            "Failed during exists() check for %s: %s",
-                            doc_url,
-                            e,
+                            "Failed during exists() check for %s: %s", doc_url, e
                         )
                         err = StoredError(
                             run_id=run_id or "",
@@ -438,11 +425,6 @@ def main():
                     if already_exists:
                         skipped += 1
                         known_in_listing += 1
-                        logger.info(
-                            "[%s] incremental skip before extract_content: %s",
-                            scraper_name,
-                            doc_url,
-                        )
                         results.append(
                             {
                                 "title": resource.title,
@@ -471,11 +453,6 @@ def main():
                     new_in_listing += 1
 
                     try:
-                        logger.info(
-                            "[%s] extracting new resource: %s",
-                            scraper_name,
-                            doc_url,
-                        )
                         resource = scraper.extract_content(resource)
                         serialized = serialize_resource(resource)
                         results.append(serialized)
@@ -486,9 +463,7 @@ def main():
                     except Exception as e:
                         errors += 1
                         logger.exception(
-                            "Failed on resource %s: %s",
-                            original_doc_url,
-                            e,
+                            "Failed on resource %s: %s", original_doc_url, e
                         )
 
                         results.append(
@@ -547,17 +522,13 @@ def main():
                     stop_after_listing = True
 
             summary = compute_summary(results)
-            all_summaries[scraper_name] = summary
-            log_summary(scraper_name, summary)
-
-            logger.info(
-                "[%s] processed=%d | inserted=%d | skipped=%d | errors=%d",
-                scraper_name,
-                processed,
-                inserted,
-                skipped,
-                errors,
-            )
+            all_summaries[scraper_name] = {
+                "processed": processed,
+                "inserted": inserted,
+                "skipped": skipped,
+                "errors": errors,
+                "summary": summary,
+            }
 
             if run_id and hasattr(storage, "finish_run"):
                 try:
@@ -589,8 +560,8 @@ def main():
                 error_stack="",
                 metadata={
                     "scraper": scraper_name,
-                    "sites": args.sites,
-                    "max_pages": args.max_pages,
+                    "sites": sites,
+                    "max_pages": max_pages,
                 },
             )
             log_and_notify_error(storage, err)
@@ -610,16 +581,51 @@ def main():
                     )
                 except Exception as fe:
                     logger.exception(
-                        "Failed to finish FAILED run for %s: %s",
-                        source_name,
-                        fe,
+                        "Failed to finish FAILED run for %s: %s", source_name, fe
                     )
 
-    if len(scrapers) > 1:
-        logger.info("==== Global summary ====")
-        for scraper_name, summary in all_summaries.items():
-            log_summary(scraper_name, summary)
+            all_summaries[scraper_name] = {
+                "processed": processed,
+                "inserted": inserted,
+                "skipped": skipped,
+                "errors": errors,
+                "fatal_error": str(e),
+            }
+
+        global_processed += processed
+        global_inserted += inserted
+        global_skipped += skipped
+        global_errors += errors
+
+    return {
+        "processed": global_processed,
+        "inserted": global_inserted,
+        "skipped": global_skipped,
+        "errors": global_errors,
+        "sites": sites or list(SCRAPER_REGISTRY.keys()),
+        "max_pages": max_pages,
+        "output_dir": output_dir,
+        "per_scraper": all_summaries,
+    }
+
+
+def run_scraper():
+    args = parse_args()
+    result = run_scraper_job(
+        sites=args.sites,
+        output_dir=args.output_dir,
+        max_pages=args.max_pages,
+        list_sites=args.list_sites,
+    )
+
+    if args.list_sites:
+        print("Available sites:")
+        for name in result["available_sites"]:
+            print(f"- {name}")
+
+    return result
 
 
 if __name__ == "__main__":
-    main()
+    result = run_scraper()
+    print(result)

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-import yaml  # pip install pyyaml
+from dotenv import load_dotenv
 
 from common_runtime.settings import Settings
 from common_storage.local import LocalStorage
@@ -20,32 +20,19 @@ from .gmail_client import (
     iter_messages_by_label,
 )
 
+load_dotenv()
 
-def load_config(path: str = "gmail_fetcher/config.yaml") -> dict[str, Any]:
-    file_cfg: dict[str, Any] = {}
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            file_cfg = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        file_cfg = {}
-
+def load_config() -> dict[str, Any]:
     return {
-        "source_name": os.getenv(
-            "GMAIL_SOURCE_NAME", file_cfg.get("source_name", "gmail_fetcher")
-        ),
-        "user_id": os.getenv("GMAIL_USER_ID", file_cfg.get("user_id", "me")),
-        "label_id": os.getenv("GMAIL_LABEL_ID", file_cfg.get("label_id")),
+        "source_name": os.getenv("GMAIL_SOURCE_NAME", "gmail_fetcher"),
+        "user_id": os.getenv("GMAIL_USER_ID", "me"),
+        "label_id": os.getenv("GMAIL_LABEL_ID"),
         "credentials_path": os.getenv(
-            "GMAIL_CREDENTIALS_PATH",
-            file_cfg.get("credentials_path", "credentials.json"),
+            "GMAIL_CREDENTIALS_PATH", "gmail_tokens/credentials.json"
         ),
-        "token_path": os.getenv(
-            "GMAIL_TOKEN_PATH", file_cfg.get("token_path", "token.json")
-        ),
-        "output_dir": os.getenv(
-            "GMAIL_OUTPUT_DIR", file_cfg.get("output_dir", "gmail_output")
-        ),
+        "token_path": os.getenv("GMAIL_TOKEN_PATH", "gmail_tokens/token.json"),
+        "output_dir": os.getenv("GMAIL_OUTPUT_DIR", "gmail_output"),
     }
 
 
@@ -169,7 +156,12 @@ def attachment_to_document(
     )
 
 
-def main():
+def run_gmail_fetcher():
+    processed = 0
+    inserted = 0
+    skipped = 0
+    errors = 0
+
     cfg = load_config()
     source_name = cfg.get("source_name", "gmail_fetcher")
     user_id = cfg.get("user_id", "me")
@@ -324,6 +316,14 @@ def main():
         f"skipped={skipped}, errors={errors}"
     )
 
+    return {
+        "processed": processed,
+        "inserted": inserted,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
 
 if __name__ == "__main__":
-    main()
+    result = run_gmail_fetcher()
+    print(result)
